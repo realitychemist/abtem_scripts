@@ -17,6 +17,7 @@ from timeit import default_timer as timer
 import warnings
 from tqdm import tqdm
 import tifffile
+from math import sin, cos, radians, degrees
 
 # %% SETTINGS
 prms = {"seed":            42,              # Pseudo-random seed
@@ -24,21 +25,22 @@ prms = {"seed":            42,              # Pseudo-random seed
         "path":            r"E:\Users\Charles\BTO PACBED\abtem",
         "filename":        "BaTiO3_mp-2998_conventional_standard.cif",
         # POTENTIAL SETTINGS
-        "sampling":        0.2,             # Sampling of potential, A
+        "sampling":        0.2,             # Sampling of potential (A)
         "tiling":          30,              # Number of times to tile projected cell
         "thickness":       200,             # Total model thickness (A)
         "thickness_step":  10,              # PACBED export thickness steps (A)
         "slice_thickness": 2,               # Thickness per simulation slice (A)
-        "zas":             [(0, 0, 1),      # Zone axes to model
-                            (0, 1, 1)],
+        "zas":             [(0, 0, 1)],     # Zone axes to model
         "fp_configs":      10,              # Number of frozen phonon configurations
-        "fp_sigmas":       {"Ba": 0.0757,   # Frozen phonon sigma values per atom type
+        "fp_sigmas":       {"Ba": 0.0757,   # Frozen phonon sigma values per atom type (A)
                             "Ti": 0.0893,   # sigma == sqrt(U_iso) (confirmed with abTEM author)
                             "Zr": 0.1050,   # Data from https://materials.springer.com/isp/crystallographic/docs/sd_1410590
                             "O":  0.0810},  # and from https://pubs.acs.org/doi/10.1021/acs.chemmater.9b04437 (for Zr)
         # PROBE SETTINGS
         "beam_energy":     200E3,           # Energy of the electron beam (eV)
         "convergence":     17.9,            # Probe semiangle of convergence (mrad)
+        "tilt_mag":        5,               # Small-angle mistilt magnitude (mrad)
+        "tilt_dir":        radians(45),     # Small-angle mistilt direction (deg from +x)
         # DETECTOR SETTINGS
         "max_batch":       200,             # Number of probe positions to propogate at once
         "max_angle":       40}              # Maximum detector angle (mrad)
@@ -62,7 +64,7 @@ with gpu:
         b = b[1]
         c = c[2]
         thickness_multiplier = int((prms["thickness"] // c)) + 1
-        atoms *= (prms["tiling"], prms["tiling"], prms["thickness_multiplier"])
+        atoms *= (prms["tiling"], prms["tiling"], thickness_multiplier)
 
         # Initial atom potential for grid matching; won't be directly used in sims
         potential = Potential(atoms,
@@ -72,9 +74,12 @@ with gpu:
                               parametrization="kirkland",
                               slice_thickness=prms["slice_thickness"])
 
+        tilt = (prms["tilt_mag"]*sin(prms["tilt_dir"]),
+                prms["tilt_mag"]*cos(prms["tilt_dir"]))
         probe = Probe(energy=prms["beam_energy"],
                       semiangle_cutoff=prms["convergence"],
-                      device="gpu")
+                      device="gpu",
+                      tilt=tilt)
         probe.grid.match(potential)
 
         if(any(angle < prms["max_angle"] for angle in probe.cutoff_scattering_angles)):
@@ -137,10 +142,10 @@ with gpu:
 
         stack = []
         for i in range(len(measurements)):
-            export_name = (os.path.splitext(prms["filename"])[0] + "_PACBED_" + str(za_idx)
-                           + "_" + str(int(prms["thickness"])) + "A"
-                           + "_with_stepsize_" + str(int(prms["thickness_step"])) + "A"
-                           + ".tif")  # Export to tif format
+            export_name = (f"{os.path.splitext(prms['filename'])[0]}_PACBED_" +
+                           f"tilt{prms['tilt_mag']}mrad@{degrees(prms['tilt_dir'])}deg_" +
+                           f"{str(za_idx)}_{str(int(prms['thickness']))}A_with_stepsize_" +
+                           f"{str(int(prms['thickness_step']))}A.tif")
             xy = measurements[i][detectors[0]].sum((0, 1)).array
             stack.append(xy)
             tifffile.imwrite(os.path.join(export_path, export_name),

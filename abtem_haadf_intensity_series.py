@@ -7,25 +7,27 @@ import ase.build as abuild
 from abtem.potentials import Potential
 from abtem.waves import Probe
 from abtem.scan import GridScan
-from abtem.detect import AnnularDetector
-from abtem.detect import SegmentedDetector
+from abtem.detect import AnnularDetector, SegmentedDetector
 from abtem.temperature import FrozenPhonons
 # Other Imports
 import cupy
 import os
-from timeit import default_timer as timer
 import warnings
-from typing import Dict, List, Tuple
-from tqdm import tqdm
 import tifffile
-from copy import deepcopy
 import numpy as np
+from timeit import default_timer as timer
+from tqdm import tqdm
+from copy import copy, deepcopy
+from itertools import combinations_with_replacement, permutations
+from random import seed, choices
+from typing import Dict, List, Tuple, Set
 
 # %% SETTINGS
 prms = {"seed":            42,             # Pseudo-random seed
         # POTENTIAL SETTINGS
         "sampling":        0.04,           # Sampling of potential (A)
-        "thickness":       200,            # Total model thickness (A)
+        # Total model thickness (A); will be rounded up to a full projected cell
+        "thickness":       200,
         "slice_thickness": 1,              # Thickness per slice (A)
         "zas":            [(0, 0, 1),      # Zone axes to model and simulate
                            (0, 1, 1)],
@@ -57,8 +59,9 @@ gpu = cupy.cuda.Device(0)  # Change to device 1 before simulation if GPU0 is bei
 
 def randomize_chem(atoms: Atoms,
                    replacements: Dict[str, Dict[str, float]],
-                   pr_seed: int = prms["seed"]) -> Atoms:
-    """
+                   prseed: int = prms["seed"]) -> Atoms:
+    """Randomize the chemistry of an ASE ``Atoms`` object via to user-defined replacement rules.
+
     Parameters
     ----------
     atoms : Atoms
@@ -83,8 +86,7 @@ def randomize_chem(atoms: Atoms,
     Atoms
         ASE ``Atoms`` object based on ``atoms``, but with the specified elemental replacements.
     """
-    from random import seed, choices
-    seed(seed)
+    seed(prseed)
 
     # Sanity check:
     for elem, rep in replacements.items():
@@ -105,52 +107,78 @@ def randomize_chem(atoms: Atoms,
     return atoms
 
 
-def gen_models(abx: Tuple[str, str, str],
-               a: int = 4.083,
-               thickness: float = prms["thickness"],
-               zas: List[Tuple[int, int, int]] = prms["zas"]) -> List[Atoms]:
-    """
+def gen_BPerm_models(abx: Tuple[str, Tuple[str, str], str],
+                     thickness: float,
+                     za: Tuple[int, int, int] = (0, 0, 1),
+                     a: int = 4.083) -> Tuple[str, Atoms]:
+    """Generate ASE ``Atoms`` models by all possible combinations and permustations of the B site.
+
     Parameters
     ----------
-    abx : Tuple[str, str, str]
-        DESCRIPTION.
+    abx : Tuple[str, Tuple[str, str], str]
+        The strings in the tuple define the chemistry of the generated models.  The first string is
+        the element which sits on the A sites, and the final string is the element which sits on
+        the X sites.  The central tuple contains the strings representing the two elements whic
+        may occupy the B sites.  For example:
+            >>> ("Ba", ("Ti", "Zr"), "O")
+        would generate barium titanate, barium zirconate, and all intermediate structures.
+    thickness : float
+        The desired total thickness of the model (will get rounded to the nearest projected cell,
+        with the projection axis equal to ``za``).
+    za : Tuple[int, int, int]
+        The zone axis along which the model should be projected.  The default is (0, 0, 1).
     a : int, optional
-        DESCRIPTION. The default is 4.083.
-    thickness : float, optional
-        DESCRIPTION. The default is prms["thickness"].
-    zas : List[Tuple[int, int, int]], optional
-        DESCRIPTION. The default is prms["zas"].
+        The cubic lattice parameter of the structure. The default is 4.083 (predicted lattice
+        parameter for the BaTi0.6Zr0.4O3).
 
-    Returns
-    -------
-    List[Atoms]
-        DESCRIPTION.
+    Yields
+    ------
+    Tuple[str, Atoms]
+        Each tuple consists of a label representing the B sites in the model (in the order in which
+        they occur) followed by an ASE ``Atoms`` object with the B sites substituted as the label
+        would suggest.  The order in which label-model pairs are yielded is arbitrary.
+
     """
 
-    models = None
-    return models
+    # Generate model with all B atoms of first type
+    test_str = f"{abx[0]}{abx[1][0]}{abx[2]}3"
+    base_uc = Atoms(test_str,
+                    cell=[a, a, a],
+                    pbc=True,
+                    scaled_positions=[(0, 0, 0),
+                                      (0.5, 0.5, 0.5),
+                                      (0.5, 0.5, 0),
+                                      (0.5, 0, 0.5),
+                                      (0, 0.5, 0.5)])
+    model = abuild.surface(base_uc, indices=za, layers=1, periodic=True)
+    thickness_multiplier = int((thickness // model.cell[2][2])) + 1
+    stack = model * (1, 1, thickness_multiplier)
 
+    # Get all B atoms in model
+    symbols = stack.get_chemical_symbols()
+    num_b_sites = symbols.count(abx[1][0])
+    b_idxs = [idx for idx, sym in enumerate(symbols) if sym == abx[1][0]]
 
-# a = 4.083
-# base_uc = Atoms("BaTiO3",
-#                 cell=[a, a, a],
-#                 pbc=[1, 1, 0],
-#                 scaled_positions=[(0, 0, 0),
-#                                   (0.5, 0.5, 0.5),
-#                                   (0.5, 0.5, 0),
-#                                   (0.5, 0, 0.5),
-#                                   (0, 0.5, 0.5)])
+    # Generate all possible arrangements of the two B site elements for this thickness
+    # These are generators because for larger models this structures could become very large
+    b_combos = combinations_with_replacement((abx[1][0], abx[1][1]), num_b_sites)
+    b_perms = (set(permutations(combo)) for combo in b_combos)
+    b_arrs = (arrangement for subset in b_perms for arrangement in subset)
 
+    # Yield a model for each arrangement
+    for arrangement in b_arrs:
+        for counter, b_idx in enumerate(b_idxs):
+            symbols[b_idx] = arrangement[counter]
+        new_stack = deepcopy(stack)
+        new_stack.set_chemical_symbols(symbols)
+        label = "".join([elem for elem in arrangement])
+        yield label, new_stack
 
-# stack_001 = abuild.surface(base_uc, indices=(0, 0, 1), layers=1, periodic=True)
-# thickness_multiplier = int((prms["thickness"] // a)) + 1  # Valid only for cubic 001 proj.
-# stack_001 *= (1, 1, thickness_multiplier)
+# TODO: Instead of generating stack in the function, generate it outside and pass it in.
+# This has two benefits: we only need to pass in a simple tuple of the B site elements, and
+# it also means we will know the thickness of one projected cell outside the function, which
+# we need to know for proper behavior in the sim loop
 
-# all_titanium = deepcopy(stack_001)
-# all_zirconium = randomize_chem(deepcopy(stack_001), {"Ti": {"Zr": 1}})
-# bzt40_random = randomize_chem(deepcopy(stack_001), {"Ti": {"Zr": 0.4}})
-
-# models = [all_titanium, all_zirconium, bzt40_random]
 
 # %% SETUP
 with gpu:
