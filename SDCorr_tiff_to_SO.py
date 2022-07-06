@@ -16,11 +16,11 @@ plt.rcParams['figure.dpi'] = 300
 
 # %% IMPORT IMAGE FILES
 
-BASE_PATH = r"E:\Users\Charles\20220524_AutoExport"
-fnames = ["1547 20220524 DPC 5.40 Mx HAADF-DF4 HAADF.tif",
-          "1548 20220524 DPC 5.40 Mx HAADF-DF4 HAADF.tif",
-          "1548 20220524 DPC 5.40 Mx HAADF-DF4 0001 HAADF.tif",
-          "1549 20220524 DPC 5.40 Mx HAADF-DF4 HAADF.tif"]
+BASE_PATH = r"E:\Users\Charles\20220701_AutoExport"
+fnames = ["20220701 1816 15.5 Mx HAADF 6.55 nm HAADF.tif",
+          "20220701 1816 15.5 Mx HAADF 6.55 nm 0001 HAADF.tif",
+          "20220701 1816 15.5 Mx HAADF 6.55 nm 0002 HAADF.tif",
+          "20220701 1816 15.5 Mx HAADF 6.55 nm 0003 HAADF.tif"]
 images = [np.array(tif.imread(os.path.join(BASE_PATH, fname))) for fname in fnames]
 imsize = [np.shape(image) for image in images]
 # Sanity check: all images must be the same resolution and must be square
@@ -45,7 +45,7 @@ print("Initial correction done!")
 
 # %% NONLINEAR REFINEMENT
 
-smerge = SP02.SPmerge02(smerge, 12, 8)
+smerge = SP02.SPmerge02(smerge, 5, 8)
 print("Nonlinear refinement done!")
 
 # %% FINAL MERGE
@@ -68,8 +68,15 @@ image_cropped = gui_crop(image_final)
 # %% EXPORT INTERMEDIATE
 
 # Run this cell if you want to save the image before column finding
-EXPORT_NAME = "20220524 5.40 Mx HAADF SDCorr.tif"
-tif.imwrite(os.path.join(BASE_PATH, EXPORT_NAME), data=image_cropped)
+EXPORT_NAME = "20220701 1816 15.5 Mx HAADF 6.55 nm HAADF SDCorr.tif"
+tif.imwrite(os.path.join(BASE_PATH, "processed", EXPORT_NAME), data=image_cropped)
+
+# %% LOAD INTERMEDIATE
+
+# Run this cell if you want to load an already corrected and cropped image for analysis
+IMPORT_PATH = r"E:\Users\Charles\20220524_AutoExport\processed"
+IMPORT_NAME = "20220524 5.40 Mx HAADF SDCorr.tif"
+image_cropped = np.array(tif.imread(os.path.join(IMPORT_PATH, IMPORT_NAME)))
 
 # %% SINGLEORIGIN INITIALIZATION
 
