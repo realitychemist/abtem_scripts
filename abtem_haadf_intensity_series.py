@@ -218,6 +218,17 @@ with gpu:
                 # Build the scan grid to the potential extents, slightly better than nyquist
                 grid = GridScan(start=[0, 0], end=potential.extent,
                                 sampling=probe.ctf.nyquist_sampling*0.9)
+                measurements = probe.validate_scan_measurements(detectors, grid)
+
+                for indices, positions in grid.generate_positions(max_batch=prms["max_batch"]):
+                    waves = probe.build(positions)
+                    # Multislice propogation
+                    waves = waves.multislice(potential, pbar=False)
+
+                    for detector in detectors:
+                        new_measurements = detector.detect(waves)
+                        grid.insert_new_measurement(measurements[detector],
+                                                    indices, new_measurements)
 
 
 #     measurements = probe.validate_scan_measurements(detectors, grid)

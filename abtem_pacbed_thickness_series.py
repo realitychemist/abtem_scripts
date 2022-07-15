@@ -173,8 +173,8 @@ with dev:
                            f"{str(int(prms['thickness_step']))}A.tif")
             xy = measurements[i][detectors[0]].sum((0, 1)).array
             stack.append(xy)
-            tifffile.imwrite(os.path.join(export_path, export_name),
-                             stack, photometric='minisblack')
+        tifffile.imwrite(os.path.join(export_path, export_name),
+                         stack, photometric='minisblack')
         print("Done!")
 
         if prms["device"] == "gpu":  # Free the GPU memory for others
