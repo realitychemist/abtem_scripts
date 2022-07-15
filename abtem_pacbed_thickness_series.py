@@ -1,5 +1,23 @@
-# %% IMPORTS
+"""
+This script generates PACBED images based on an input .cif file, and automatically creates
+a thickness series of images.  The settings which may commonly be adjusted are collected in
+the settings dictionary just after the imports.
 
+The basic logic of the script is:
+    1.  Read the .cif file
+    2.  Initialize a pixelated detector to caputre the PACBEDs
+    3.  Generate a full-thickness model from the .cif file
+    4.  Setup other needed objects (probe, gridscan, frozen phonon configs, etc)
+    5.  Generate a potential object for each frozen phonon configuration
+    6.  Slice the potential into chunks (of "thiickness_step") along propogation direction
+    7.  Propogate the probe through that chunk for each position in the gridscan
+    8.  Detect the probes and store those measurements into a list
+    9.  Sum together the measurement from each probe position to get PACBEDs for each thickness
+    10. Export the PACBEDs as a .tif stack
+"""
+
+
+# %% IMPORTS
 # ASE Imports
 import ase.io as aio
 import ase.build as abuild
@@ -21,6 +39,8 @@ from math import sin, cos, radians, degrees
 
 # %% SETTINGS
 prms = {"seed":            42,              # Pseudo-random seed
+        "device":          "gpu",           # Set computing device, must be "gpu" or "cpu"
+        "gpu_num":         0,               # If "device" == "gpu", which GPU to use (0 or 1)
         # STRUCTURE FILE LOCATION
         "path":            r"E:\Users\Charles\BTO PACBED\abtem",
         "filename":        "BaTiO3_mp-2998_conventional_standard.cif",
@@ -45,14 +65,19 @@ prms = {"seed":            42,              # Pseudo-random seed
         "max_batch":       200,             # Number of probe positions to propogate at once
         "max_angle":       40}              # Maximum detector angle (mrad)
 
-gpu = cupy.cuda.Device(0)  # Change to device 1 before simulation if GPU0 is being used
-# %% RUN
-struct = aio.read(os.path.join(prms["path"], prms["filename"]))
-with gpu:
-    # For GPU memory management
+# %% HARDWARE SETUP
+if prms["device"] == "gpu":
     mempool = cupy.get_default_memory_pool()
     pinned_mempool = cupy.get_default_pinned_memory_pool()
+    dev = cupy.cuda.Device(prms["gpu_num"])
+elif prms["device"] == "cpu":
+    dev = cupy.cuda.Device(None)
+else:
+    raise TypeError('prms["device"] must be set to one of "gpu" or "cpu"')
 
+# %% RUN
+struct = aio.read(os.path.join(prms["path"], prms["filename"]))
+with dev:
     detectors = [PixelatedDetector(max_angle=prms["max_angle"], resample="uniform")]
     for za_idx in prms["zas"]:
         start_time = timer()
@@ -69,7 +94,7 @@ with gpu:
         # Initial atom potential for grid matching; won't be directly used in sims
         potential = Potential(atoms,
                               sampling=prms["sampling"],
-                              device="gpu",
+                              device=prms["device"],
                               projection="infinite",
                               parametrization="kirkland",
                               slice_thickness=prms["slice_thickness"])
@@ -78,7 +103,7 @@ with gpu:
                 prms["tilt_mag"]*cos(prms["tilt_dir"]))
         probe = Probe(energy=prms["beam_energy"],
                       semiangle_cutoff=prms["convergence"],
-                      device="gpu",
+                      device=prms["device"],
                       tilt=tilt)
         probe.grid.match(potential)
 
@@ -112,8 +137,8 @@ with gpu:
             # Must rebuild the potential for each frozon phonon configuration
             potential = Potential(atom_cfg,
                                   sampling=prms["sampling"],
-                                  device="gpu",
-                                  storage="cpu",
+                                  device=prms["device"],
+                                  storage="cpu",  # Store in RAM, otherwise can overload GPU memory
                                   projection="infinite",
                                   parametrization="kirkland",
                                   slice_thickness=prms["slice_thickness"])
@@ -126,7 +151,7 @@ with gpu:
                                                                 unit="chunk"):
                     potential_slices = potential[slice_start:slice_end]
                     waves = waves.multislice(potential_slices, pbar=False)
-                    for detector in detectors:
+                    for detector in detectors:  # Only one detector, but this supports multiple
                         new_measurements = detector.detect(waves)
                         grid.insert_new_measurement(measurements[chunk_idx][detector],
                                                     indices, new_measurements)
@@ -151,7 +176,10 @@ with gpu:
             tifffile.imwrite(os.path.join(export_path, export_name),
                              stack, photometric='minisblack')
         print("Done!")
-        mempool.free_all_blocks()
-        pinned_mempool.free_all_blocks()
+
+        if prms["device"] == "gpu":  # Free the GPU memory for others
+            # If this isn't done, GPU memory is only freed when the Python kernel is closed/reset
+            mempool.free_all_blocks()
+            pinned_mempool.free_all_blocks()
 
     print("\nSimulation complete!")

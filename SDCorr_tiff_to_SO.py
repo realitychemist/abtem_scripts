@@ -82,9 +82,9 @@ image_cropped = np.array(tif.imread(os.path.join(IMPORT_PATH, IMPORT_NAME)))
 
 CIF_PATH = r"E:\Users\Charles\BaTiO3 Controls\No Shift\BaTiO3_99_noshift.cif"
 
-za = [1, 0, 0]  # Zone axis direction
-a2 = [0, 1, 0]  # Apparent horizontal axis in projection
-a3 = [0, 0, 1]  # Most vertical axis in projection
+za = [0, 0, 1]  # Zone axis direction
+a2 = [1, 0, 0]  # Apparent horizontal axis in projection
+a3 = [0, 1, 0]  # Most vertical axis in projection
 
 # Initialize UnitCell object
 uc = so.UnitCell(CIF_PATH)
@@ -92,15 +92,16 @@ uc.transform_basis(za, a2, a3)
 
 # Project unit cell, combine coincident columns
 # Ignore light elements for HAADF
-uc.project_uc_2d(proj_axis=0, ignore_elements=['O'])
+uc.project_uc_2d(proj_axis=0, ignore_elements=["O"])
 uc.combine_prox_cols(toler=1e-2)
 uc.plot_unit_cell()  # Check this output to make sure it's sensible
 
 # %% BASIS VECTOR DEFINITION + REF LATTICE FIT
 
 # Initialize AtomicColumnLattice object
-acl = so.AtomicColumnLattice(image_cropped, uc, resolution=0.8,
-                             xlim=None, ylim=None)
+image_cropped = so.image_norm(image_cropped)
+acl = so.AtomicColumnLattice(image_cropped, uc, probe_fwhm=0.8,
+                             origin_atom_column=0)
 
 # Get real space basis vectors using the FFT
 # If some FFT peaks are weak or absent (such as forbidden reflections),
@@ -112,8 +113,8 @@ acl.define_reference_lattice()
 # %% ATOM COLUMN FITTING
 
 # Fit atom columns at reference lattice points
-acl.fit_atom_columns(buffer=10, local_thresh_factor=0.95,
-                     grouping_filter=None, diff_filter="auto")
+acl.fit_atom_columns(buffer=20, local_thresh_factor=0.95,
+                     grouping_filter="auto", diff_filter="auto", parallelize=False)
 # Check results (including residuals) to verify accuracy!
 print("Atom column fitting done!")
 
