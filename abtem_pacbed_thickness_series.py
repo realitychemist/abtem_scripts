@@ -21,6 +21,7 @@ The basic logic of the script is:
 # ASE Imports
 import ase.io as aio
 import ase.build as abuild
+# from ase.visualize import view as aview  # Useful for checking generated structure
 # AbTEM Imports
 from abtem.potentials import Potential
 from abtem.waves import Probe
@@ -82,14 +83,19 @@ with dev:
     for za_idx in prms["zas"]:
         start_time = timer()
         print("\nSetting up for " + str(za_idx) + " zone axis...", end=" ")
-        atoms = abuild.surface(struct, indices=za_idx, layers=1, periodic=True)
-        atoms = orthogonalize_cell(atoms)
-        a, b, c = atoms.cell
+
+        # Calculate parameters for the projected cell
+        _tmp_atoms = abuild.surface(struct, indices=za_idx, layers=1, periodic=True)
+        a, b, c = _tmp_atoms.cell
         a = a[0]
         b = b[1]
         c = c[2]
+        del _tmp_atoms  # Don't accidentally use the temporary surface
+
         thickness_multiplier = int((prms["thickness"] // c)) + 1
-        atoms *= (prms["tiling"], prms["tiling"], thickness_multiplier)
+        atoms = abuild.surface(struct, indices=za_idx, layers=thickness_multiplier, periodic=True)
+        atoms = orthogonalize_cell(atoms)
+        atoms *= (prms["tiling"], prms["tiling"], 1)
 
         # Initial atom potential for grid matching; won't be directly used in sims
         potential = Potential(atoms,

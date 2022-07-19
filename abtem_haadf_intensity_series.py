@@ -10,25 +10,25 @@ from abtem.scan import GridScan
 from abtem.detect import AnnularDetector, SegmentedDetector
 from abtem.temperature import FrozenPhonons
 # Other Imports
-import cupy
 import os
-import warnings
 import tifffile
+import rle
 import numpy as np
 from timeit import default_timer as timer
 from tqdm import tqdm
-from copy import copy, deepcopy
+from copy import deepcopy
 from itertools import combinations_with_replacement, permutations
 from random import seed, choices
-from typing import Dict, List, Tuple, Set
+from typing import Dict, Tuple
 
 # %% SETTINGS
 prms = {"seed":            42,             # Pseudo-random seed
+        "export_path":     r"E:\Users\Charles\BZT Intensity Mapping",  # Export path, sans subdir
         # POTENTIAL SETTINGS
         "lattice_a":       4.083,          # Pseudo-cubic lattice parameter (A)
         "sampling":        0.04,           # Sampling of potential (A)
-        # Total model thickness (A); will be rounded up to a full projected cell
-        "thickness":       200,
+        "thickness":       100,            # Total model thickness (A);
+                                           #  will be rounded up to a full projected cell
         "slice_thickness": 1,              # Thickness per slice (A)
         "zas":            [(0, 0, 1),      # Zone axis to model and simulate,
                            (1, 1, 0)],
@@ -54,11 +54,10 @@ prms = {"seed":            42,             # Pseudo-random seed
         "df4_max_angle":   65,             # DF4 annulus outer extent (mrad)
         "df4_rotation":    19*np.pi / 5}   # Rotation of DF segments (rad)
 
-gpu = cupy.cuda.Device(0)  # Change to device 1 before simulation if GPU0 is being used
 # %% CUSTOM BUILD FUNCTIONS
 
 
-def randomize_chem(atoms: Atoms,
+def randomize_chem(atoms: Atoms,  # Not currently in use, but saved for possible future use
                    replacements: Dict[str, Dict[str, float]],
                    prseed: int = prms["seed"]) -> Atoms:
     """Randomize the chemistry of an ASE ``Atoms`` object via to user-defined replacement rules.
@@ -108,7 +107,7 @@ def randomize_chem(atoms: Atoms,
     return atoms
 
 
-def gen_BPerm_models(model: Atoms, bs: Tuple[str, str]) -> Tuple[str, Atoms]:
+def gen_arrangements(model: Atoms, bs: Tuple[str, str]) -> Tuple[str, Atoms]:
     """Generate ASE ``Atoms`` models by all possible combinations and permustations of the B site.
 
     Parameters
@@ -139,7 +138,7 @@ def gen_BPerm_models(model: Atoms, bs: Tuple[str, str]) -> Tuple[str, Atoms]:
 
     # Generate all possible arrangements of the two B site elements for this thickness
     # These are generators because for larger models this structures could become very large
-    b_combos = combinations_with_replacement(*bs, num_b_sites)
+    b_combos = combinations_with_replacement(bs, num_b_sites)
     b_perms = (set(permutations(combo)) for combo in b_combos)
     b_arrs = (arrangement for subset in b_perms for arrangement in subset)
 
@@ -149,116 +148,93 @@ def gen_BPerm_models(model: Atoms, bs: Tuple[str, str]) -> Tuple[str, Atoms]:
             symbols[b_idx] = arrangement[counter]
         new_model = deepcopy(model)
         new_model.set_chemical_symbols(symbols)
-        label = "".join([elem for elem in arrangement])
+        encoding = list(zip(*reversed(rle.encode([elem for elem in arrangement]))))
+        label = "".join(str(cnt)+str(sym) for cnt, sym in encoding)
         yield label, new_model
 
 
-# %% SIMULATION LOOP
+# %% SIMULATE
+# Detector setup
+haadf = AnnularDetector(inner=prms["haadf_min_angle"],
+                        outer=prms["haadf_max_angle"])
+df4 = SegmentedDetector(inner=prms["df4_min_angle"],
+                        outer=prms["df4_max_angle"],
+                        nbins_radial=1, nbins_angular=4,
+                        rotation=prms["df4_rotation"])
+detectors = [haadf, df4]
 
-with gpu:
-    # Manual GPU memory management per loop
-    mempool = cupy.get_default_memory_pool()
-    pinned_mempool = cupy.get_default_pinned_memory_pool()
+# Probe setup
+probe = Probe(energy=prms["beam_energy"],
+              semiangle_cutoff=prms["conv_angle"],
+              device="cpu")
 
-    # Detector setup
-    haadf = AnnularDetector(inner=prms["haadf_min_angle"],
-                            outer=prms["haadf_max_angle"])
-    df4 = SegmentedDetector(inner=prms["df4_min_angle"],
-                            outer=prms["df4_max_angle"],
-                            nbins_radial=1, nbins_angular=4,
-                            rotation=prms["df4_rotation"])
-    detectors = [haadf, df4]
+# Set export path here (needed in the loop), make the directory if it doesn't exist
+export_path = os.path.join(prms["export_path"], "arrangements")
+if not os.path.exists(export_path):
+    os.makedirs(export_path)
 
-    # Probe setup
-    probe = Probe(energy=prms["beam_energy"],
-                  semiangle_cutoff=prms["convergence"],
-                  device="gpu")
+# Build the base unit cell and make it into a surface with the correct zone axis
+for za in prms["zas"]:
+    print(f"Starting simulation for zone axis {''.join([str(e) for e in za])}...")
+    uc = Atoms("BaTiO3",
+               cell=[prms["lattice_a"], prms["lattice_a"], prms["lattice_a"]],
+               pbc=True,
+               scaled_positions=[(0, 0, 0),
+                                 (0.5, 0.5, 0.5),
+                                 (0.5, 0.5, 0),
+                                 (0.5, 0, 0.5),
+                                 (0, 0.5, 0.5)])
+    surf = abuild.surface(uc, za, layers=1, periodic=True)
 
-    # Build the base unit cell and make it into a surface with the correct zone axis
-    for za in prms["zas"]:
-        uc = Atoms("BaTiO3",
-                   cell=[prms["lattice_a"], prms["lattice_a"], prms["lattice_a"]],
-                   pbc=True,
-                   scaled_positions=[(0, 0, 0),
-                                     (0.5, 0.5, 0.5),
-                                     (0.5, 0.5, 0),
-                                     (0.5, 0, 0.5),
-                                     (0, 0.5, 0.5)])
-        surf = abuild.surface(uc, za, layers=1, periodic=True)
+    # Figure out what the thickness steps will be (add one projected cell each time)
+    c = surf.cell[2][2]
+    # Ceiling the number of steps so that the thickness set in prms will be reached
+    steps = int(np.ceil(prms["thickness"] / c))
+    thickness_multipliers = [(step+1) for step in range(steps)]
+    for thick_mul in thickness_multipliers:
+        print(f"Simulating stack {thick_mul} of {len(thickness_multipliers)} "
+              f"(stack thickness {c*thick_mul} A):")
+        # Generate all B-site arrangements for each thickness
+        stack = surf * (1, 1, thick_mul)
+        arrangements = gen_arrangements(stack, ("Ti", "Zr"))
 
-        # Figure out what the thickness steps will be (add one projected cell each time)
-        c = surf.cell[2][2]
-        # Ceiling the number of steps so that the thickness set in prms will be reached
-        steps = np.ceil(prms["thickness"] / c)
-        thicknesses = [(step+1)*c for step in range(steps)]
-        for thickness in thicknesses:
-            # Generate all B-site arrangements for each thickness
-            stack = surf * (1, 1, thickness)
-            arrangements = gen_BPerm_models(stack, ("Ti", "Zr"))
-            # Build frozen phonon configurations for each arrangement
-            fps = []
-            for label, arr in arrangements:
-                fp = FrozenPhonons(arr,
-                                   sigmas=prms["fp_sigmas"],
-                                   num_configs=prms["fp_configs"],
-                                   seed=prms["seed"])
-                fps.append((label, fp))
+        # Build frozen phonon configurations for each arrangement
+        arrangements_with_fps = []
+        for label, arr in arrangements:
+            fp = FrozenPhonons(arr,
+                               sigmas=prms["fp_sigmas"],
+                               num_configs=prms["fp_cfgs"],
+                               seed=prms["seed"])
+            arrangements_with_fps.append((label, fp))
 
-            for label, fp_config in fps:
-                # Rebuild the potential for each frozon phonon configuration
-                potential = Potential(fp_config,
-                                      sampling=prms["sampling"],
-                                      device="gpu",
-                                      storage="cpu",
-                                      projection="infinite",
-                                      parametrization="kirkland",
-                                      slice_thickness=prms["slice_thickness"])
-                # Match probe gpts to potential
-                probe.grid.match(potential)
-                # Build the scan grid to the potential extents, slightly better than nyquist
-                grid = GridScan(start=[0, 0], end=potential.extent,
-                                sampling=probe.ctf.nyquist_sampling*0.9)
-                measurements = probe.validate_scan_measurements(detectors, grid)
+        # One frozen phonon object with n configs per arrangement
+        for label, arr_fp in tqdm(arrangements_with_fps,
+                                  desc="Arrangements", unit="arr"):
+            potential = Potential(arr_fp,
+                                  sampling=prms["sampling"],
+                                  device="cpu",
+                                  storage="cpu",
+                                  projection="infinite",
+                                  parametrization="kirkland",
+                                  slice_thickness=prms["slice_thickness"])
+            # Match probe gpts to potential
+            probe.grid.match(potential)
+            # Build the scan grid to the potential extents, slightly better than nyquist
+            grid = GridScan(start=[0, 0], end=potential.extent,
+                            sampling=probe.ctf.nyquist_sampling*0.9)
+            measurements = probe.validate_scan_measurements(detectors, grid)
 
-                for indices, positions in grid.generate_positions(max_batch=prms["max_batch"]):
-                    waves = probe.build(positions)
-                    # Multislice propogation
-                    waves = waves.multislice(potential, pbar=False)
+            for indices, positions in grid.generate_positions(max_batch=prms["max_batch"]):
+                waves = probe.build(positions)
+                # Multislice propogation
+                waves = waves.multislice(potential, pbar=False)
 
-                    for detector in detectors:
-                        new_measurements = detector.detect(waves)
-                        grid.insert_new_measurement(measurements[detector],
-                                                    indices, new_measurements)
+                for detector in detectors:
+                    new_measurements = detector.detect(waves)
+                    # Detector measurements are per fp config, so take the mean when adding
+                    grid.insert_new_measurement(measurements[detector],
+                                                indices, new_measurements.mean(0))
 
-
-#     measurements = probe.validate_scan_measurements(detectors, grid)
-#     # %% RUN
-#     print("Beginning simulation...", end="\n\n")
-#     start_time = timer()
-#     num_fp_cfgs = len(fp)
-#     cfg_num = 0
-#     for atom_cfg in fp:
-#         cfg_num += 1
-#         print("Frozen phonon configuration " + str(cfg_num) + "/" + str(num_fp_cfgs) + ":")
-#         # Must rebuild the potential for each frozon phonon configuration
-#         potential = Potential(atom_cfg,
-#                               sampling=prms["sampling"],
-#                               device="gpu",
-#                               storage="cpu",
-#                               projection="infinite",
-#                               parametrization="kirkland",
-#                               slice_thickness=prms["slice_thickness"])
-
-#     end_time = timer()
-#     elapsed = "{:0.2f}".format(end_time - start_time) + "s"
-#     print("Finished, elapsed time was " + elapsed)
-
-#     # %% EXPORT
-#     # TODO: Export stuff is broken now since it wanted the import filename, fix it
-#     # print("Exporting...", end=" ")
-#     # export_path = os.path.join(path, "PACBED")
-#     # if not os.path.exists(export_path):
-#     #     os.makedirs(export_path)
 
 #     # stack = []
 #     # for i in range(len(measurements)):
@@ -271,7 +247,5 @@ with gpu:
 #     #     tifffile.imwrite(os.path.join(export_path, export_name),
 #     #                      stack, photometric='minisblack')
 #     # print("Done!")
-#     # mempool.free_all_blocks()
-#     # pinned_mempool.free_all_blocks()
 
 # print("\nSimulation complete!")
