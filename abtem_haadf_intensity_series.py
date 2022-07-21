@@ -1,3 +1,10 @@
+"""
+THIS SCRIPT IS CURRENTLY NOT BEING USED, IT WAS TOO SLOW OF AN APPROACH
+I'VE BEGUN DEVELOPING A SCRIPT WHICH ATTEMPTS TO DO WHAT THIS DOES BUT BY PICKING RANDOM
+ARRANGEMENTS FOR A SUBSET OF POSSIBLE THICKNESSES
+I'M KEEPING THIS BECAUSE I EXPECT IT TO BE USEFUL AT SOME POINT IN THE FUTURE
+"""
+
 # %% IMPORTS
 
 # ASE Imports
@@ -55,56 +62,6 @@ prms = {"seed":            42,             # Pseudo-random seed
         "df4_rotation":    19*np.pi / 5}   # Rotation of DF segments (rad)
 
 # %% CUSTOM BUILD FUNCTIONS
-
-
-def randomize_chem(atoms: Atoms,  # Not currently in use, but saved for possible future use
-                   replacements: Dict[str, Dict[str, float]],
-                   prseed: int = prms["seed"]) -> Atoms:
-    """Randomize the chemistry of an ASE ``Atoms`` object via to user-defined replacement rules.
-
-    Parameters
-    ----------
-    atoms : Atoms
-        Initial ASE ``Atoms`` object.  This object will be mutated.
-    replacements : Dict[str, Dict[str, float]]
-        Replacement dictionary.  The keys should be the symbols of the initial elements to replace,
-        and the values should themselves be dictionaries.  The value dicts should have keys which
-        are the elements that will replace the corresponding initial element, and the the values
-        should be floats representing the fraction of the initial element to replace with the given
-        element.  The sum of the floats must be <= 1 for each initial element.  For example:
-            >>> {"Ba": {"Sr": 1},
-            >>>  "Ti": {"Zr": 0.4,
-            >>>         "Nb": 0.05}}
-        would replace all Ba atoms in ``atoms`` with Sr, would randomly replace 40% of Ti atoms in
-        ``atoms`` with Zr, and randomly replace 5% (of the initial amount of Ti) with Nb.
-    pr_seed : int, optional
-        Pseudo-random seed.  The default is ``prms["seed"]``, the global pseudo-random seed for the
-        script.
-
-    Returns
-    -------
-    Atoms
-        ASE ``Atoms`` object based on ``atoms``, but with the specified elemental replacements.
-    """
-    seed(prseed)
-
-    # Sanity check:
-    for elem, rep in replacements.items():
-        if sum(rep.values()) < 1:  # Add in the "NOP weights" (chance to not replace) if needed
-            rep[elem] = 1 - sum(rep.values())
-        assert sum(rep.values()) == 1  # If this is ever False, we're likely to get garbage results
-
-    symbols = atoms.get_chemical_symbols()
-    counts = dict(zip(set(symbols), [symbols.count(e) for e in set(symbols)]))
-
-    for elem, reps in replacements.items():
-        elem_idxs = [idx for idx, sym in enumerate(symbols) if sym == elem]
-        rep_with = choices(list(reps.keys()), weights=list(reps.values()), k=counts[elem])
-        for i in elem_idxs:
-            symbols[i] = rep_with.pop()
-
-    atoms.set_chemical_symbols(symbols)
-    return atoms
 
 
 def gen_arrangements(model: Atoms, bs: Tuple[str, str]) -> Tuple[str, Atoms]:
