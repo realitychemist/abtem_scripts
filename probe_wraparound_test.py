@@ -141,7 +141,7 @@ for ca in conv_angles:
                                   "coma": 300,
                                   "coma_angle": 155,
                                   "Cs": -5000})
-        for potential in tqdm(potentials):
+        for potential in tqdm(potentials, desc="Simulating", unit="potential"):
             probe.grid.match(potential)
             measurement = probe.scan(scanpoint, [detector], potential, pbar=False)
 
