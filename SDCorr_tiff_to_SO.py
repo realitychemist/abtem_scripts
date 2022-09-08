@@ -3,6 +3,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import tifffile as tif
+import pandas as pd
 
 import SingleOrigin as so
 
@@ -153,6 +154,7 @@ acl_rot.plot_disp_vects(scalebar=True, scalebar_len_nm=2,
                         max_colorwheel_range_pm=10)
 
 # %% COMPUTE INTENSITY RATIOS
+# TODO: Ensure that all points are being mapped to the right location (incl. for Moran)
 
 posint_df = acl.at_cols[["elem", "u", "v", "x_fit", "y_fit", "x_ref",
                          "y_ref", "total_col_int"]].reset_index(drop=True)
@@ -165,8 +167,8 @@ def _format_neighbors(row):
         return None
 
     _, idxs = row["neighbors"]
-    # TODO: Automate finding the no-near-neighbor index
-    idxs = list(filter(lambda x: x != 618, idxs))
+    no_nn = max(idxs)
+    idxs = list(filter(lambda x: x != no_nn, idxs))
     new_idxs = []
     for i in idxs:
         x, y = kdtree_a_sites.data[i]
@@ -202,13 +204,11 @@ posint_df["int_ratio"] = posint_df.apply(_get_int_ratios, axis=1)
 posint_df["disp"] = posint_df.apply(lambda r: (
     r["x_fit"]-r["x_ref"], r["y_fit"]-r["y_ref"]), axis=1)
 
-
-# %% PLOT RELEVANT DATA
+# %% INTERMEDIATE CALCS
 
 # For each Ti column, extract the coordinates and make a Voronoi object
 bpts = posint_df.loc[posint_df["elem"] == "Ti",
                      ["u", "v", "x_fit", "y_fit"]].reset_index(drop=True)
-
 # Create normalized colormap from ratios
 ratios = posint_df.loc[posint_df["elem"] == "Ti", "int_ratio"].reset_index(drop=True)
 rmax = max(ratios)
@@ -216,29 +216,46 @@ rmin = min(ratios)
 norm = Normalize(vmin=rmin, vmax=rmax, clip=True)
 mapper = cm.ScalarMappable(norm=norm, cmap=cm.Spectral_r)
 
-disps = posint_df.loc[posint_df["elem"] == "Ti", "disp"].reset_index(drop=True)
+# %% PYSAL ANALYSIS -- GLOBAL MORAN'S I
 
-# Plot the Voronoi map over the image
-# fig, ax = acl.plot_disp_vects(sites_to_plot="all")
+# Build adjacency list for defining weights object in a form digestable by pySAL
+adjlist = {}
+for idx, (_, site) in enumerate(bpts.iterrows()):
+    neighbor_umn = bpts[(bpts.u == site.u - 1) & (bpts.v == site.v)]
+    neighbor_upl = bpts[(bpts.u == site.u + 1) & (bpts.v == site.v)]
+    neighbor_vmn = bpts[(bpts.u == site.u) & (bpts.v == site.v - 1)]
+    neighbor_vpl = bpts[(bpts.u == site.u) & (bpts.v == site.v + 1)]
+    nlist = tuple([n.index[0] for n in [neighbor_umn, neighbor_upl,
+                                        neighbor_vmn, neighbor_vpl] if n.size != 0])
+    adjlist[idx] = nlist
+# Create the pySAL weights object
+w = weights.W(adjlist)
+w.transform = "r"  # Transform to row-standard form
 
-fig, ax = plt.subplots()
-ax.imshow(image_cropped, cmap="gray")
+mor = esda.moran.Moran(ratios, w, permutations=10000)  # Global Moran object
+print(f"Global Moran's I:     {round(mor.I, 5)}\n"
+      f"Expected I for CSR:  {round(mor.EI_sim, 5)}\n"
+      f"p-value (10k perms.): {round(mor.p_sim, 5)}")
+
+# %% PYSAL ANALYSIS -- LOCAL MORAN'S I
+mor_loc = esda.Moran_Local(ratios, w, permutations=10000)
+
+bpts["moran_I"] = mor_loc.Is
+bpts["moran_p"] = mor_loc.p_sim
+
+fig, axs = plt.subplots(1, 2, gridspec_kw={'width_ratios': [1.17, 1]})
+axs[0].imshow(image_cropped, cmap="gray")
+axs[1].imshow(image_cropped, cmap="gray")
 
 for i, b in bpts.iterrows():
-    ax.scatter(b["x_fit"], b["y_fit"], s=12, color=mapper.to_rgba(
-        ratios[i]), linewidths=0, alpha=1)
+    axs[0].scatter(b["x_fit"], b["y_fit"], s=12, color=mapper.to_rgba(
+                   ratios[i]), linewidths=0, alpha=1)
 
-ax.axis("off")
-fig.colorbar(mapper, label="B/A Intensity Ratio")
+    alpha = 0
+    if b["moran_p"] <= 0.05:
+        alpha = 1
+    axs[1].scatter(b["x_fit"], b["y_fit"], s=12, color="green", linewidths=0, alpha=alpha)
 
-# %% PYSAL ANALYSIS
-
-
-for idx, (_, site) in enumerate(bpts.iterrows()):
-    neighbor_umn = bpts[(bpts.v == site.u - 1) & (bpts.u == site.v)]
-    neighbor_upl = bpts[(bpts.v == site.u + 1) & (bpts.u == site.v)]
-    neighbor_vmn = bpts[(bpts.v == site.u) & (bpts.v == site.v - 1)]
-    neighbor_vpl = bpts[(bpts.v == site.u) & (bpts.v == site.v + 1)]
-    for n in [neighbor_umn, neighbor_upl, neighbor_vmn, neighbor_vpl]:
-        if n is not None:
-            pass
+axs[0].axis("off")
+axs[1].axis("off")
+fig.colorbar(mapper, ax=axs[0], label="B/A Intensity Ratio", location="left", fraction=0.04)
