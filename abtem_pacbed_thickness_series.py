@@ -21,7 +21,8 @@ The basic logic of the script is:
 # ASE Imports
 import ase.io as aio
 import ase.build as abuild
-# from ase.visualize import view as aview  # Useful for checking generated structure
+# from ase.visualize import view as aview
+# Useful for checking generated structure
 # AbTEM Imports
 from abtem.potentials import Potential
 from abtem.waves import Probe
