@@ -40,17 +40,17 @@ import tifffile
 from math import sin, cos, radians, degrees
 
 # %% SETTINGS
-prms = {"seed":            42,              # Pseudo-random seed
+prms = {"seed":            77,              # Pseudo-random seed
         "device":          "gpu",           # Set computing device, must be "gpu" or "cpu"
         "gpu_num":         0,               # If "device" == "gpu", which GPU to use (0 or 1)
         # STRUCTURE FILE LOCATION
-        "path":            r"E:\Users\Charles\BTO PACBED\abtem",
-        "filename":        "BaTiO3_mp-2998_conventional_standard.cif",
+        "path":            r"E:\Users\Charles",
+        "filename":        "BZT.cif",
         # POTENTIAL SETTINGS
         "sampling":        0.2,             # Sampling of potential (A)
         "tiling":          30,              # Number of times to tile projected cell
-        "thickness":       200,             # Total model thickness (A)
-        "thickness_step":  10,              # PACBED export thickness steps (A)
+        "thickness":       400,             # Total model thickness (A)
+        "thickness_step":  20,              # PACBED export thickness steps (A)
         "slice_thickness": 2,               # Thickness per simulation slice (A)
         "zas":             [(0, 0, 1)],     # Zone axes to model
         "fp_configs":      10,              # Number of frozen phonon configurations
@@ -61,8 +61,8 @@ prms = {"seed":            42,              # Pseudo-random seed
         # PROBE SETTINGS
         "beam_energy":     200E3,           # Energy of the electron beam (eV)
         "convergence":     17.9,            # Probe semiangle of convergence (mrad)
-        "tilt_mag":        5,               # Small-angle mistilt magnitude (mrad)
-        "tilt_dir":        radians(45),     # Small-angle mistilt direction (deg from +x)
+        "tilt_mag":        0,               # Small-angle mistilt magnitude (mrad)
+        "tilt_dir":        radians(270),    # Small-angle mistilt direction (deg from +x)
         # DETECTOR SETTINGS
         "max_batch":       200,             # Number of probe positions to propogate at once
         "max_angle":       40}              # Maximum detector angle (mrad)
@@ -166,7 +166,7 @@ with dev:
         elapsed = "{:0.2f}".format(end_time - start_time) + "s"
         print("Finished simulating zone axis " + str(za_idx), ", elapsed time was " + elapsed)
 
-        # %% EXPORT
+# %% EXPORT
         print("Exporting...", end=" ")
         export_path = os.path.join(prms["path"], "PACBED")
         if not os.path.exists(export_path):
@@ -190,3 +190,9 @@ with dev:
             pinned_mempool.free_all_blocks()
 
     print("\nSimulation complete!")
+
+# %% PRINT THICKNESSES
+tkss = []
+for (_, slice_end) in save_chunks:
+    tkss.append(round(slice_end/prms["slice_thickness"] * c / 10, 2))
+print("Thicknesses: " + str(tkss))
