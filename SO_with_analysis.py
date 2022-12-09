@@ -6,85 +6,20 @@ import tifffile as tif
 
 import SingleOrigin as so
 
-from scanning_drift_corr import SPmerge01linear as SP01
-from scanning_drift_corr import SPmerge02 as SP02
-from scanning_drift_corr import SPmerge03 as SP03
-
 from scipy import spatial
 from scipy import stats
+from scipy import optimize
 from copy import deepcopy
 from matplotlib import cm
 from matplotlib.colors import Normalize, to_rgba
-from quickcrop import gui_crop
 
 from pysal.explore import esda
 from pysal.lib import weights
 
-# plt.rcParams['figure.figsize'] = [8.0, 8.0]
-# plt.rcParams['figure.dpi'] = 300
+# %% LOAD DRIFT CORRECTED IMAGE
 
-# %% IMPORT IMAGE FILES
-
-BASE_PATH = r"E:\Users\Charles\20220524_AutoExport"
-fnames = ["1557 20220524 DPC 7.60 Mx HAADF-DF4 HAADF.tif",
-          "1558 20220524 DPC 7.60 Mx HAADF-DF4 HAADF.tif",
-          "1558 20220524 DPC 7.60 Mx HAADF-DF4 0001 HAADF.tif",
-          "1559 20220524 DPC 7.60 Mx HAADF-DF4 HAADF.tif"]
-images = [np.array(tif.imread(os.path.join(BASE_PATH, fname))) for fname in fnames]
-imsize = [np.shape(image) for image in images]
-# Sanity check: all images must be the same resolution and must be square
-if not all((len(set(size)) == 1 for size in imsize)):  # Squareness check
-    import sys
-    sys.tracebacklimit = 0
-    raise RuntimeError("At least one imported image is non-square; "
-                       "all images should be square and the same size.  "
-                       f"Sizes: {imsize}")
-if not len(set(imsize)) == 1:
-    import sys
-    sys.tracebacklimit = 0
-    raise RuntimeError("At least one imported image has a size differing from the others; "
-                       "all images should be square and the same size.  "
-                       f"Sizes: {imsize}")
-
-# %% INITIAL LINEAR CORRECTION
-
-scanAngles = (0, -90, -180, -270)  # Same order as input images
-smerge = SP01.SPmerge01linear(scanAngles, *images)
-print("Initial correction done!")
-
-# %% NONLINEAR REFINEMENT
-
-smerge = SP02.SPmerge02(smerge, 8, 8)
-print("Nonlinear refinement done!")
-
-# %% FINAL MERGE
-
-# Can take a couple minutes, has no progress bar
-image_corrected, signal_array, density_array = SP03.SPmerge03(smerge, KDEsigma=0.5)
-print("Final merge done!")
-
-# %% BIT DEPTH CORRECTION
-
-# Convert format for export to 16-bit tiff
-image_final = ((image_corrected - np.min(image_corrected)) /
-               (np.max(image_corrected) - np.min(image_corrected))) * 65535
-image_final = image_final.astype(np.uint16)
-
-# %% CROP SQUARE
-
-image_cropped = gui_crop(image_final)
-
-# %% EXPORT INTERMEDIATE
-
-# Run this cell if you want to save the image before column finding
-EXPORT_NAME = "20220524 5.40 Mx HAADF SDCorr.tif"
-tif.imwrite(os.path.join(BASE_PATH, "processed", EXPORT_NAME), data=image_cropped)
-
-# %% LOAD INTERMEDIATE
-
-# Run this cell if you want to load an already corrected and cropped image for analysis
 IMPORT_PATH = r"E:\Users\Charles\bzt_data_100_20221118"
-IMPORT_NAME = "Inverse FFT of 11-16-2022_14.56.19_HAADFdrift_corr_HAADF_NOGRD_highpass.tif"
+IMPORT_NAME = "11-16-2022_14.56.19_HAADFdrift_corr_HAADF_NOGRD.tif"
 image_cropped = np.array(tif.imread(os.path.join(IMPORT_PATH, IMPORT_NAME)))
 # image_cropped = gui_crop(image_cropped)  # If a mask method other than STD needs to be used
 image_cropped = so.image_norm(image_cropped)
@@ -119,8 +54,8 @@ lattice = hr_img.add_lattice("BZT", uc)
 lattice.fft_get_basis_vect(a1_order=1, a2_order=1, sigma=2)
 
 # %% DEFINE REGION MASK
-# lattice.get_region_mask_std(r=15, buffer=15, thresh=0.25)
-lattice.region_mask = np.ones(image_cropped.shape)
+lattice.get_region_mask_std(r=15, buffer=15, thresh=0.25)
+# lattice.region_mask = np.ones(image_cropped.shape)
 
 # %% REFERENCE LATTICE FIT
 lattice.define_reference_lattice()
@@ -128,7 +63,7 @@ lattice.define_reference_lattice()
 # %% ATOM COLUMN FITTING
 
 # Fit atom columns at reference lattice points
-lattice.fit_atom_columns(buffer=100, local_thresh_factor=0.5, use_circ_gauss=False,
+lattice.fit_atom_columns(buffer=10, local_thresh_factor=0.5, use_circ_gauss=False,
                          grouping_filter=None, diff_filter="auto", parallelize=True)
 # Check results (including residuals) to verify accuracy!
 print("Atom column fitting done!")
@@ -198,6 +133,20 @@ def _reject_outliers(row, df, outlier_scale):
         return row["int_ratio"]
 
 
+def thickness_est(point, a, b, c):
+    # Given a point (x, y) and fitted coefficients, returns the thickness at the point
+    x, y = point[0], point[1]
+    return a*x + b*y + c
+
+
+def _thickness_modeler(points):
+    # Take a series of 3D points (x, y, thickness) and model a thickness surface for the image
+    # First separate out the x, y data from thickness data to effectively feed the optimizer
+    coords = [[x, y] for x, y, _ in points]
+    thicks = [t for _, _, t in points]
+    return optimize.curve_fit(thickness_est, coords, thicks)
+
+
 def compute_neighborhood_stats(df, maxdist=55, n=4, a_elem="Ba", outlier_scale=10):
     # KDTree for fast NN lookup
     a_site_tree = spatial.KDTree(df.loc[df["elem"] == a_elem, "x_fit":"y_fit"])
@@ -219,10 +168,18 @@ def compute_neighborhood_stats(df, maxdist=55, n=4, a_elem="Ba", outlier_scale=1
     df["disp"] = df.apply(lambda row: (row["x_fit"] - row["x_ref"],
                                        row["y_fit"] - row["y_ref"]), axis=1)
 
+    # Assign an estimated thickness to each site
+    pts = [(135.4, 1155.1, 2), (1148.0, 1155.1, 17), (2160.6, 1155.1, 25.5)]
+    optimized_coefficients, _ = _thickness_modeler(pts)
+    a, b, c = optimized_coefficients
+    df["est_thickness"] = df.apply(lambda row: thickness_est((row["x_fit"], row["y_fit"]),
+                                                             a, b, c), axis=1)
+
     # Discard the A sites, and any outliers, then drop irrelevant columns
     drop_idxs = df[np.isnan(df["int_ratio"])].index
     df.drop(drop_idxs, inplace=True)
-    df.drop(["elem", "site_frac", "x", "y", "weight", "channel", "neighbors"], axis=1, inplace=True)
+    df.drop(["elem", "site_frac", "x", "y", "weight", "channel", "neighbors"],
+            axis=1, inplace=True)
     df.reset_index(drop=True, inplace=True)
 
 
@@ -263,7 +220,7 @@ def make_adjlist(df, zone, a_2d=None, a_elem="Ba"):
                 if zone in zones[6:]:
                     if a_2d is None:
                         raise TypeError("An array must be passed into a_2d for this zone")
-                    
+
                     # Need to get 2nd NNs in the B row ==> extra neighbors on shorter of u or v
                     if np.linalg.norm(a_2d[0]) < np.linalg.norm(a_2d[1]):  # u is shorter
                         nn2_up = df.loc[(df["u"] == row["u"] + 2) & (df["v"] == row["v"])]
