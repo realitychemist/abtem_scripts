@@ -18,8 +18,8 @@ from pysal.lib import weights
 
 # %% LOAD DRIFT CORRECTED IMAGE
 
-IMPORT_PATH = r"E:\Users\Charles\bzt_data_100_20221118"
-IMPORT_NAME = "11-16-2022_14.56.19_HAADFdrift_corr_HAADF_NOGRD.tif"
+IMPORT_PATH = r"E:\Users\Charles\bzt_data_100_20221212"
+IMPORT_NAME = "12-12-2022_17.31.53_HAADFdrift_corr_HAADF_NOGRD.tif"
 image_cropped = np.array(tif.imread(os.path.join(IMPORT_PATH, IMPORT_NAME)))
 # image_cropped = gui_crop(image_cropped)  # If a mask method other than STD needs to be used
 image_cropped = so.image_norm(image_cropped)
@@ -63,7 +63,7 @@ lattice.define_reference_lattice()
 # %% ATOM COLUMN FITTING
 
 # Fit atom columns at reference lattice points
-lattice.fit_atom_columns(buffer=10, local_thresh_factor=0.5, use_circ_gauss=False,
+lattice.fit_atom_columns(buffer=10, local_thresh_factor=0.1, use_circ_gauss=False,
                          grouping_filter=None, diff_filter="auto", parallelize=True)
 # Check results (including residuals) to verify accuracy!
 print("Atom column fitting done!")
