@@ -19,8 +19,8 @@ from sys import maxsize
 from scipy import spatial, stats
 from matplotlib import cm
 from matplotlib.colors import Normalize, to_rgba
-from pysal.explore import esda
-from pysal.lib import weights
+import esda
+from libpysal import weights
 import cupy
 import os
 import pickle
