@@ -7,20 +7,26 @@
 
 # %% IMPORTS
 import os
+import typing
 import numpy as np
 import matplotlib.pyplot as plt
 import tifffile as tif
 
 import SingleOrigin as so
 
-import quickcrop.quickcrop as qc
+#import quickcrop.quickcrop as qc
 from scipy import spatial, stats, optimize, ndimage, signal
 from copy import deepcopy
+
 from matplotlib import cm
-from matplotlib.colors import Normalize, to_rgba
+from matplotlib.colors import Normalize, to_rgb, to_rgba
+from matplotlib.lines import Line2D
+from matplotlib import gridspec
+import cmasher
 
 import esda
 from libpysal import weights
+from random import shuffle
 
 # %% CUSTOM FUNCTIONS
 
@@ -84,7 +90,7 @@ def grow_tree(df, a2d, kind):
     return tree
 
 
-def get_near_neighbors(row, df, a2d, tree, n, kind):
+def get_near_neighbors(row, df, a2d, tree, n):
     """
     Parameters
     ----------
@@ -96,9 +102,6 @@ def get_near_neighbors(row, df, a2d, tree, n, kind):
         A numpy kdtree used to search for near neighbors given the coordinates in row
     n : int
         The number of near neighbors to search for
-    kind : string or list of strings
-        String(s) representing the kind of atom columns which are valid neighbors; matches against
-        the "elem" column in df.  A value of None matches all kinds of columns
 
     Raises
     ------
@@ -139,13 +142,16 @@ def _test_outliers(x, med, mad, outlier_scale):
         return x
 
 
-def reject_outliers(df, outlier_scale=10):
+def reject_outliers(df, mode, outlier_scale=10):
     """
     Parameters
     ----------
     df : DataFrame
         The DataFrame represening the sites fitted in the image.
         Warning: this function *will mutate* df
+    mode : str
+        Should be one of "total_col_int" or "disp_mag"; determines which column in df is used when
+        checking for outlier status
     outlier_scale : float, optional
         Determines what counts as an outlier.  Rows are outliers if the difference between the
         row's dispersion and the median dispersion in df is greater than `outlier_scale * MAD`
@@ -156,27 +162,38 @@ def reject_outliers(df, outlier_scale=10):
     -------
     None, but mutates df by dropping outlier rows and resetting the indices of df
     """
-    for col in ["disp_mag", "norm_int"]:
-        rmed = np.median(df[col])
-        rmad = stats.median_abs_deviation(df[col])
+    rmed = np.median(df[mode])
+    rmad = stats.median_abs_deviation(df[mode])
 
-        df[col] = df.apply(lambda row: _test_outliers(row[col], rmed, rmad, outlier_scale),
-                           axis=1)
+    df[mode] = df.apply(lambda row: _test_outliers(row[mode], rmed, rmad, outlier_scale), axis=1)
 
-        outlier_count = df[col].isna().sum()
-        if outlier_count != 0:
-            print(f"Dropping {outlier_count} outlier values based on values in '{col}'.")
-            df.drop(df.loc[np.isnan(df[col])].index, inplace=True)
-            df.reset_index(drop=True, inplace=True)
+    outlier_count = df[mode].isna().sum()
+    if outlier_count != 0:
+        print(f"Dropping {outlier_count} outlier site{'s'[:outlier_count^1]}" +
+              f" based on values in '{mode}'.")
+        df.drop(df.loc[np.isnan(df[mode])].index, inplace=True)
+        df.reset_index(drop=True, inplace=True)
 
 
-def calculate_dispersion(df):
+def _dot_disp(row, df):
+    neighbor_disps = list(map(np.array, [df.iloc[i]["disp"] for i in row["neighborhood"]]))
+    mean_neighbor_disp = np.sum(neighbor_disps, axis=0)/len(neighbor_disps)
+    return np.dot(row["disp"], mean_neighbor_disp)
+
+
+def disp_calc(df, kind=None, normalize=False):
     """
     Parameters
     ----------
     df : DataFrame
         The DataFrame represening the sites fitted in the image.
         Warning: this function *will mutate* df
+    kind : str
+        The kind of column to normalize to, matching against `df["elem"]`, or "all".  The default
+        is None
+    normalize : bool
+        Whether or not to add a column with (globally) normalized values for `dot_disp`.  The
+        default is False
     Returns
     -------
     None, but mutates df by adding a column "disp" representing dispersion (vector displacement
@@ -184,7 +201,18 @@ def calculate_dispersion(df):
     """
     df["disp"] = df.apply(lambda row: (row["x_fit"] - row["x_ref"],
                                        row["y_fit"] - row["y_ref"]), axis=1)
-    df["disp_mag"] = df.apply(lambda row: np.linalg.norm(row["disp"]), axis=1)
+    df["dot_disp"] = df.apply(lambda row: _dot_disp(row, df), axis=1)
+
+    if normalize:
+        if kind is None:
+            raise RuntimeError("Must set `kind` if using `normalize`")
+        if kind == "all":
+            ddmin, ddmax = min(df["dot_disp"]), max(df["dot_disp"])
+        else:
+            ddmin = min(df.loc[df["elem"] == kind, "dot_disp"])
+            ddmax = max(df.loc[df["elem"] == kind, "dot_disp"])
+        df["dot_normal_disp"] = df.apply(lambda row:
+                                         (row["dot_disp"] - ddmin)/(ddmax - ddmin), axis=1)
 
 
 def drop_elements(df, e):
@@ -206,6 +234,16 @@ def drop_elements(df, e):
     df.reset_index(drop=True, inplace=True)
 
 
+def _global_minmax(row, df, kind):
+    site_intensity = row["total_col_int"]
+    if kind is None:
+        min_int, max_int = min(df["total_col_int"]), max(df["total_col_int"])
+    else:
+        min_int = min(df.loc[df["elem"] == kind, "total_col_int"])
+        max_int = max(df.loc[df["elem"] == kind, "total_col_int"])
+    return (site_intensity - min_int) / (max_int - min_int)
+
+
 def _ratio(row, df):
     site_intensity = row["total_col_int"]
     neighbor_intensities = [df.iloc[i]["total_col_int"] for i in row["neighborhood"]]
@@ -220,7 +258,7 @@ def _standard_score(row, df):
 
 
 def _off(row):
-    return row["total_col_int"] 
+    return row["total_col_int"]
 
 
 def normalize_intensity(df, a2d, n=4, method="ratio", kind=None):
@@ -235,8 +273,8 @@ def normalize_intensity(df, a2d, n=4, method="ratio", kind=None):
     n : int, optional
         The number of neighboring sites to normalize against. The default is 4
     method : string or None, optional
-        The normalization method to use.  Available methods are "ratio", "standard_score", and
-        "off"/None.  The default is "ratio"
+        The normalization method to use.  Available methods are "ratio", "standard_score",
+        "off"/None, and "global_minmax".  The default is "ratio"
     kind : string or None
         String(s) representing the kind of atom columns which are valid neighbors; matches against
         the "elem" column in df.  A value of None matches all kinds of columns
@@ -253,7 +291,7 @@ def normalize_intensity(df, a2d, n=4, method="ratio", kind=None):
     """
     tree = grow_tree(df, a2d, kind)
     df["neighborhood"] = df.apply(lambda row:
-                                  get_near_neighbors(row, df, a2d, tree, n, kind), axis=1)
+                                  get_near_neighbors(row, df, a2d, tree, n), axis=1)
 
     match method:
         case "ratio":
@@ -262,6 +300,8 @@ def normalize_intensity(df, a2d, n=4, method="ratio", kind=None):
             df["norm_int"] = df.apply(lambda row: _standard_score(row, df), axis=1)
         case "off" | None:
             df["norm_int"] = df.apply(lambda row: _off(row), axis=1)
+        case "global_minmax":
+            df["norm_int"] = df.apply(lambda row: _global_minmax(row, df, kind), axis=1)
         case _:
             raise NotImplementedError("The specified normalization method" +
                                       " has not been implemented.")
@@ -344,165 +384,370 @@ def make_weights(df, adj_type, a2d=None):
                 neighbor_list += _120zone(df, row, a2d)
             case _:
                 raise NotImplementedError("The requested adjacency type has not been implemented")
-        neighbor_list = tuple(neighbor_list)
-        adjlist[idx] = neighbor_list
+        # The indices need to be strings to avoid a bug in pySAL esda.geary_local_mv where if the
+        # indices are numeric, they get summed into the statistic (!), destroying any real signal
+        neighbor_list = tuple(map(str, neighbor_list))
+        adjlist[str(idx)] = neighbor_list
 
-    w = weights.W(adjlist)  # Create the pySAL weights object from the adjacency list
+    w = weights.W(adjlist, silence_warnings=True)
     w.transform = "r"  # Transform to row-standard form
     return w
 
 
-def moran_global(df, adj_type, a2d, p=10000, printstats=True):
+def _sink_islands(df, w):
     """
     Parameters
     ----------
     df : DataFrame
-        The DataFrame represening the sites fitted in the image
-    adj_type : string
-        The kind of adjacency rule to use.  See the documentation for make_weights
-    a2d : 2x2 array of floats
-        Used to transform from uv coordinates to Angstroms
-    p : int, optional
-        The number of permutations to use for testing against CSR. The default is 10000
-    printstats : bool
-        Whether or not to print some statistics related to the global Moran's I test
-
-    Returns
+        The frame containing sites which are islands.
+        Warning: this will mutate the frame by dropping island rows!
+    w : libpysal.weights
+        Weights object defining adjacency: this is the object that knows which sites are islands
     -------
-    mor : esda.moran.Moran
-        Object containing the information used in the Moran's I analysis
+    w : libpysal.weights
+        Weights object with the islands removed
+
     """
-    w = make_weights(df, adj_type, a2d)
-    nints = [ni for ni in df["norm_int"]]
-    mor = esda.moran.Moran(nints, w, permutations=p)
-    
-    if printstats:
-        print(f"Global Moran's I:     {round(mor.I, 5)}\n"
-              f"Expected I for CSR:  {round(mor.EI_sim, 5)}\n"
-              f"p-value (10k perms.): {round(mor.p_sim, 5)}")
-        if mor.p_sim < 0.05:
-            print("Observed distribution not consistent with complete spatial randomness")
-        else:
-            print("Observed distribution is consistent with complete spatial randomness")
+    islands = set(w.islands)  # Having this be a set makes everything simpler and faster
+    print(f"Dropping {len(islands)} outlier site{'s'[:len(islands)^1]} based on 'w.islands'")
+    w = weights.w_subset(w, set(w.id_order) - islands)
 
-    return mor
+    df.drop(index=islands, inplace=True)
+    return w
 
 
-def moran_local(df, adj_type, a2d, p=10000):
+def get_stats(df, adj_type, a2d, kind, columns, p=10000, printstats=True):
     """
     Parameters
     ----------
     df : DataFrame
-        The DataFrame represening the sites fitted in the image
+        The DataFrame represening the sites fitted in the image.
+        Warning: if w contains islands, this will mutate df by removing them!
     adj_type : string
-        The kind of adjacency rule to use.  See the documentation for make_weights
+        The kind of adjacency rule to use.  See the documentation for `make_weights`.
     a2d : 2x2 array of floats
-        Used to transform from uv coordinates to Angstroms
+        Used to transform from uv coordinates to Angstroms.
+    kind : string
+        The kind of statistical test to perform.  Options are: "moran_global", "moran_local",
+        "moran_global_bivariate", "moran_local_bivariate", "geary_global", "geary_local",
+        and "geary_local_multivariate".
+    columns : string or iterable of strings
+        String(s) representing the column(s) in df to run the test on.  Note that not all
+        values of `kind` are compatible with an arbitrary amount of strings!  Specifically:
+        "moran_global", "moran_local", "geary_global", and "geary_local" require a single string
+        (or a length one iterable of strings); "moran_global_bivariate" and "moran_local_bivariate"
+        require an iterable containing exactly two strings; and "geary_local_multivariate" requires
+        an iterable containing at least two strings.
+
+        BEWARE: for the bivariate Moran methods, the order of the two strings in this parameter
+        will change the meaning of the returned statistic!  For `columns=["a", "b"]`, the Moran
+        statistic represents the inward influence upon the value of `a` at a given site of the
+        values of `b` at neighboring sites.
     p : int, optional
         The number of permutations to use for testing against CSR. The default is 10000
-
+    printstats : bool, optional
+        Whether or not to print some statistics to the console. This setting only applies to global
+        statistics (be they Moran or Geary).  The default is True.
     Returns
     -------
-    mor : esda.moran.Moran_Local
-        Object containing the information used in the local Moran's I analysis
+    stat_blob
+        The statistics object returned by whatever pysal function ended up being called.  Can take
+        on a variety of types depending on what kind of statistics are being used.
     """
-    w = make_weights(df, adj_type, a2d)
-    nints = [ni for ni in df["norm_int"]]
-    mor = esda.moran.Moran_Local(nints, w, permutations=p)
-    return mor
+    w = make_weights(df, adj_type, a2d)  # May contain islands, so sink them
+    if len(w.islands) != 0:
+        w = _sink_islands(df, w)
+
+    if len(columns) == 0:
+        raise RuntimeError("`columns` parameter must not be empty")
+
+    # Match against the different kinds of statistical tests we might be performing
+    match kind:
+        # ====== # MORAN STATISTICS # ====== #
+        case "moran_global" | "moran_local":
+            # Valid columns types: string or iterable containing exactly one string
+            if not (isinstance(columns, str) or (isinstance(columns, typing.Iterable)
+                                                 and len(columns) == 1)):
+                raise RuntimeError("Mismatch between `kind` and `columns` parameters")
+            if not isinstance(columns, str):
+                columns = columns[0]  # If the string is in another iterable, unwrap it
+
+            vals = [val for val in df[columns]]
+
+            if kind == "moran_global":
+                stat_blob = esda.moran.Moran(vals, w, permutations=p)
+                if printstats:
+                    print(f"Global Moran's I:     {round(stat_blob.I, 5)}\n"
+                          f"Expected I for CSR:  {round(stat_blob.EI_sim, 5)}\n"
+                          f"p-value ({p} perms.): {round(stat_blob.p_sim, 5)}")
+                    if stat_blob.p_sim < 0.05:
+                        print("Observed distribution not consistent with CSR")
+                    else:
+                        print("Observed distribution consistent with CSR")
+
+            elif kind == "moran_local":
+                stat_blob = esda.moran.Moran_Local(vals, w, permutations=p)
+
+        case "moran_global_bivariate" | "moran_local_bivariate":
+            # Valid columns types: iterable containing exactly two strings
+            if not (isinstance(columns, typing.Iterable) and len(columns) == 2):
+                raise RuntimeError("Mismatch between `kind` and `columns` parameters")
+
+            vals = [[val for val in df[col]] for col in columns]
+
+            if kind == "moran_global_bivariate":
+                stat_blob = esda.moran.Moran_BV(vals[0], vals[1], w, permutations=p)
+                if printstats:
+                    print(f"Global Moran's I:     {round(stat_blob.I, 5)}\n"
+                          f"Expected I for CSR:  {round(stat_blob.EI_sim, 5)}\n"
+                          f"p-value ({p} perms.): {round(stat_blob.p_sim, 5)}")
+                    if stat_blob.p_sim < 0.05:
+                        print("Observed distribution not consistent with CSR")
+                    else:
+                        print("Observed distribution consistent with CSR")
+
+            elif kind == "moran_local_bivariate":
+                stat_blob = esda.moran.Moran_Local_BV(vals[0], vals[1], w, permutations=p)
+
+        # ====== # GEARY STATISTICS # ====== #
+        case "geary_global" | "geary_local":
+            # Valid columns types: string or iterable containing exactly one string
+            if not (isinstance(columns, str) or (isinstance(columns, typing.Iterable)
+                                                 and len(columns) == 1)):
+                raise RuntimeError("Mismatch between `kind` and `columns` parameters")
+            if not isinstance(columns, str):
+                columns = columns[0]  # If the string is in another iterable, unwrap it
+
+            vals = vals = [val for val in df[columns]]
+
+            if kind == "geary_global":
+                stat_blob = esda.Geary(vals, w, permutations=p)
+                if printstats:
+                    print(f"Global Gear's C':     {round(stat_blob.C, 5)}\n"
+                          f"Expected C for CSR:  {round(stat_blob.EC_sim, 5)}\n"
+                          f"p-value ({p} perms.): {round(stat_blob.p_sim, 5)}")
+                    if stat_blob.p_sim < 0.05:
+                        print("Observed distribution not consistent with CSR")
+                    else:
+                        print("Observed distribution consistent with CSR")
+
+            elif kind == "geary_local":
+                stat_blob = esda.Geary_Local(connectivity=w, labels=True, permutations=p)
+                stat_blob.fit(vals)
+
+        case "geary_local_multivariate":
+            if not (isinstance(columns, typing.Iterable) and len(columns) >= 2):
+                raise RuntimeError("Mismatch between `kind` and `columns` parameters")
+
+            vals = [[val for val in df[col]] for col in columns]
+
+            stat_blob = esda.Geary_Local_MV(connectivity=w, permutations=p)
+            stat_blob.fit(vals)
+
+        case _:
+            raise NotImplementedError("The requested statistical test has not been implemented," +
+                                      " or `kind` was an invalid string")
+
+    return stat_blob
 
 
-def add_stats_to_frame(df, mor):
+def add_stats_to_frame(df, sts, kind, sig=0.05):
     """
     Parameters
     ----------
     df : DataFrame
         The DataFrame to which the stats should be added
-    mor : esda.moran.Moran_Local
-        The object containing the local Moran statistics to be added to the frame
-
+    sts : a variety of types depending on what kind of statistics are being used
+        The object containing the local statistics to be added to the frame
+    kind : string
+        The kind of statistic being added (e.g. "moran" or "geary")
     Returns
     -------
     None, but will of course mutate df
     """
-    df["moran_I"] = mor.Is
-    df["moran_p"] = mor.p_sim
-    df["moran_quad"] = mor.q
+    df[f"{kind}_p"] = sts.p_sim
+    if kind == "moran":
+        df["moran_I"] = sts.Is
+        df["moran_quad"] = sts.q
+    if kind == "geary":
+        df["geary_C"] = sts.localG
+        if "labs" in sts.__dict__:
+            df["geary_label"] = sts.labs
+        # else:
+        #     # pySAL's implementation of multivariate local Geary does not include labels
+        #     # We need to do a bit of work to add them ourselves
+        #     x = np.asarray(sts.variables).flatten()
+        #     x_mean = np.mean(x)
+        #     eij_mean = np.mean(sts.localG)
+        #     labs = np.empty(len(x))
+        #     locg_lt_eij = sts.localG < eij_mean
+        #     p_leq_sig = sts.p_sim <= sig
+
+        #     # Outliers
+        #     labs[locg_lt_eij & (x > x_mean) & p_leq_sig] = "outlier"
+        #     # Cluster members
+        #     labs[locg_lt_eij & (x < x_mean) & p_leq_sig] = "cluster"
+        #     # Other
+        #     labs[(sts.localG > eij_mean) & p_leq_sig] = "other"
+        #     # Non-significant
+        #     labs[sts.p_sim > sig] = "non-significant"
 
 
-def colorize_cluster(ps, quads, p_bands=[0.001, 0.01, 0.05], tints=[0, 1/3, 2/3]):
-    # RGB color coding for clusters and outliers
-    hh_clst_color = (41/255, 235/255, 0)   # Green
-    lh_otlr_color = (240/255, 0, 180/255)  # Purple
-    ll_clst_color = (0, 113/255, 235/255)  # Blue
-    hl_otlr_color = (245/255, 155/255, 0)  # Orange
-
-    colors = [hh_clst_color, lh_otlr_color, ll_clst_color, hl_otlr_color]  # ORDER MATTERS
-    color_arr = [colors[q-1] for q in quads]
-
-    # If the simulated p value is significant, make the point visible
-    alpha_arr = [(1,) if p <= max(p_bands) else (0,) for p in ps]
-
-    # Decrease saturation based on significance band
-    color_arr = [(c[0] + (1 - c[0]) * next(i * 1/len(p_bands)
-                                           for i, v in enumerate(p_bands) if v > p),
-                  c[1] + (1 - c[1]) * next(i * 1/len(p_bands)
-                                           for i, v in enumerate(p_bands) if v > p),
-                  c[2] + (1 - c[2]) * next(i * 1/len(p_bands)
-                                           for i, v in enumerate(p_bands) if v > p))
-                 if p <= max(p_bands) else c for c, p in zip(color_arr, ps)]
-
-    z = zip(color_arr, alpha_arr)
-    rgbas = [to_rgba(rgb + a) for rgb, a in z]
-    return rgbas
+def _moran_cluster_members(df, sig):
+    core_members = {i for i, p in enumerate(df["moran_p"]) if (p <= sig)}
+    members = set(core_members)
+    for m in core_members:
+        members.update(df.iloc[m]["neighborhood"])
+    return members
 
 
-def plot_local_clusters(df, img, intensity_colormap=cm.viridis,
-                        image_colormap="gray", s=70):
-    norm = Normalize(vmin=min(df["norm_int"]),
-                     vmax=max(df["norm_int"]), clip=True)
-    mapper = cm.ScalarMappable(norm=norm, cmap=intensity_colormap)
+def plot_moran_clusters(df, img, var_cmap=plt.get_cmap("cmr.amber"), image_cmap="bone", sig=0.05):
+    # plt.style.use("dark_background")  # For testing, because it's easier to look at on a screen
+    plt.style.use("seaborn-v0_8-colorblind")
+    # Mappers for colorizing the voronoi plots
+    norm = Normalize(vmin=0, vmax=1, clip=True)
+    mapper = cm.ScalarMappable(norm=norm, cmap=var_cmap)
 
     fig, axs = plt.subplots(1, 2, gridspec_kw={'width_ratios': [1.17, 1]})
-    axs[0].imshow(img, cmap=image_colormap)
-    axs[1].imshow(img, cmap=image_colormap)
+    fig.tight_layout()
+    plt.subplots_adjust(wspace=0.02, hspace=0)
+
+    axs[0].set_title("Normalized Locally Correlated Displacement")
+    fig.colorbar(mapper, ax=axs[0], location="left", fraction=0.04, pad=0.02)
+    axs[1].set_title("Clusters")
+
+    # Each set of axes gets an image
+    for ax in axs:
+        ax.imshow(img, cmap=image_cmap)
+        ax.axis("off")
+        # Set limits to keep them from being distorted by the voronoi polygons
+        ax.set_xlim(left=0, right=img.shape[0])
+        ax.set_ylim(bottom=img.shape[1], top=0)
 
     xs, ys = df["x_fit"], df["y_fit"]
-    axs[0].scatter(xs, ys, color=mapper.to_rgba([ni for ni in df["norm_int"]]), s=s, linewidths=0)
+    vor = spatial.Voronoi([(x, y) for x, y in zip(xs, ys)])
 
-    ps = [p for p in df["moran_p"]]  # REMEMBER: These are *pseudo* p-values
-    quads = [q for q in df["moran_quad"]]
-    axs[1].scatter(xs, ys, color=colorize_cluster(ps, quads), s=s, linewidths=0)
+    cluster_members = _moran_cluster_members(df, sig)
+    # Colorize the voronoi cells
+    for r in range(len(vor.point_region)):
+        region = vor.regions[vor.point_region[r]]
+        if -1 not in region:
+            polygon = [vor.vertices[i] for i in region]
+            axs[0].fill(*zip(*polygon),
+                        color=mapper.to_rgba(df.iloc[r]["dot_normal_disp"]), alpha=0.5)
+            if r in cluster_members:
+                if df.iloc[r]["moran_quad"] in {1, 4}:
+                    clust_kind = to_rgba("goldenrod", alpha=0.5)
+                elif df.iloc[r]["moran_quad"] in {2, 3}:
+                    clust_kind = to_rgba("maroon", alpha=0.5)
+                else:
+                    clust_kind = to_rgba("black", alpha=0.5)
+                axs[1].fill(*zip(*polygon), c=clust_kind)
+            else:
+                axs[1].fill(*zip(*polygon), c=(0.1, 0.05, 0.05, 0.5))
+    for ax in axs:
+        ax.quiver(xs, ys, df["disp"].str[0], df["disp"].str[1], color="#C0C0C0")
 
-    axs[0].axis("off")
-    axs[1].axis("off")
-    fig.colorbar(mapper, ax=axs[0], label="Normalized Intensity", location="left", fraction=0.04)
+
+def _geary_cluster_members(df, sig):
+    core_members = {i for i, (p, c) in enumerate(zip(df["geary_p"], df["geary_C"]))
+                    if (p <= sig) & (c <= 2)}  # 2 is the expected value of Ci
+    members = set(core_members)
+    for m in core_members:
+        members.update(df.iloc[m]["neighborhood"])
+    return members
+
+
+def plot_geary_clusters(df, img, sig=0.05, var_cmap=plt.get_cmap("cmr.amber"), image_cmap="bone"):
+    # plt.style.use("dark_background")  # For testing, because it's easier to look at on a screen
+    plt.style.use("seaborn-v0_8-colorblind")
+    # Mappers for colorizing the voronoi plots
+    norm = Normalize(vmin=0, vmax=1, clip=True)
+    mapper = cm.ScalarMappable(norm=norm, cmap=var_cmap)
+
+    fig, axs = plt.subplots(1, 3, width_ratios=[1.068, 1, 1])
+    fig.tight_layout()
+    plt.subplots_adjust(wspace=0.02, hspace=0)
+
+    axs[0].set_title("Normalized Intensity")
+    fig.colorbar(mapper, ax=axs[0], location="left", fraction=0.04, pad=0.02)
+    axs[1].set_title("Normalized Locally Correlated Displacement")
+    axs[2].set_title("Multivariate Clusters")
+
+    # Each set of axes gets an image
+    for ax in axs:
+        ax.imshow(img, cmap=image_cmap)
+        ax.axis("off")
+        # Set limits to keep them from being distorted by the voronoi polygons
+        ax.set_xlim(left=0, right=img.shape[0])
+        ax.set_ylim(bottom=img.shape[1], top=0)
+
+    cluster_members = _geary_cluster_members(df, sig=sig)
+    int_upper, int_lower = (np.mean(df["norm_int"]), np.mean(df["norm_int"]))
+    disp_upper, disp_lower = (np.mean(df["dot_normal_disp"]), np.mean(df["dot_normal_disp"]))
+
+    xs, ys = df["x_fit"], df["y_fit"]
+    vor = spatial.Voronoi([(x, y) for x, y in zip(xs, ys)])
+
+    # Colorize the voronoi cells
+    for r in range(len(vor.point_region)):
+        region = vor.regions[vor.point_region[r]]
+        if -1 not in region:
+            polygon = [vor.vertices[i] for i in region]
+            axs[0].fill(*zip(*polygon),
+                        color=mapper.to_rgba(df.iloc[r]["norm_int"]), alpha=0.5)
+            axs[1].fill(*zip(*polygon),
+                        color=mapper.to_rgba(df.iloc[r]["dot_normal_disp"]), alpha=0.5)
+            
+            if r in cluster_members:
+                if df.iloc[r]["dot_normal_disp"] >= disp_upper:
+                    clust_kind = (*to_rgb("goldenrod"), 0.5)
+                elif df.iloc[r]["dot_normal_disp"] < disp_lower:
+                    clust_kind = (*to_rgb("maroon"), 0.5)
+            else:
+                clust_kind = (0, 0, 0, 0.5)
+            axs[2].fill(*zip(*polygon), color=clust_kind)
+
+    # Add arrows to the displacement plot
+    axs[1].quiver(xs, ys, df["disp"].str[0], df["disp"].str[1], color="#C0C0C0")
+    axs[2].quiver(xs, ys, df["disp"].str[0], df["disp"].str[1], color="#C0C0C0")
+
+    # Legend for the cluster plot
+    legend_elements = [Line2D([0], [0], marker="o", linestyle="none", markeredgecolor="none",
+                              markerfacecolor="goldenrod",
+                              label="Polar Cluster"),
+                       Line2D([0], [0], marker="o", linestyle="none", markeredgecolor="none",
+                              markerfacecolor="maroon",
+                              label="Non-Polar Cluster")]
+    axs[2].legend(handles=legend_elements, bbox_to_anchor=(0.5, -0.20), loc="lower center")
+
+    plt.show()
 
 
 # %% LOAD DRIFT CORRECTED IMAGE
 
-IMPORT_PATH = r"E:\Users\Charles\bzt_data_100_20221118"
-IMPORT_NAME = "11-16-2022_14.56.19_HAADFdrift_corr_HAADF_NOGRD.tif"
+IMPORT_PATH = r"C:\Users\charles\Documents\AlScN\img"
+IMPORT_NAME = "AlScN0.5.tif"
 image_cropped = np.array(tif.imread(os.path.join(IMPORT_PATH, IMPORT_NAME)))
-image_cropped = qc.gui_crop(image_cropped)
-image_cropped = so.image_norm(image_cropped)
+# image_cropped = qc.gui_crop(image_cropped)
+# image_cropped = so.image_norm(image_cropped)
 
-_, image_cropped = divide_image_frequencies(image_cropped, s=350, show_images=True)
+# _, image_cropped = divide_image_frequencies(image_cropped, s=350, show_images=True)
 image_cropped = so.image_norm(image_cropped)
 
 # %% SINGLEORIGIN INITIALIZATION
 
-CIF_PATH = r"E:\Users\Charles\BZT.cif"
+CIF_PATH = r"C:\Users\charles\Documents\AlScN\raw\AlN.cif"
 
-za = [1, 0, 0]  # Zone axis direction
-a1 = [0, 1, 0]  # Apparent horizontal axis in projection
-a2 = [0, 0, 1]  # Most vertical axis in projection
+za = [1, 1, 0]  # Zone axis direction
+a1 = [-1, 1, 0]  # Apparent horizontal axis in projection
+a2 = [0, 0, -1]  # Most vertical axis in projection
 
 uc = so.UnitCell(CIF_PATH, origin_shift=[0, 0, 0])
 uc.atoms.replace("Ti/O", "Ti/Zr", inplace=True)
 
 # Ignore light elements for HAADF
-uc.project_zone_axis(za, a1, a2, ignore_elements=["O"])
+uc.project_zone_axis(za, a1, a2, ignore_elements=["N"])
 uc.combine_prox_cols(toler=1e-2)
 # uc.plot_unit_cell()  # Uncomment and check this output if changing the u.c.
 
@@ -510,7 +755,7 @@ hr_img = so.HRImage(image_cropped)
 lattice = hr_img.add_lattice("BZT", uc)
 
 # Tidy namespace
-del za, a1, a2, uc, IMPORT_PATH, IMPORT_NAME, CIF_PATH
+# del za, a1, a2, uc, IMPORT_PATH, IMPORT_NAME, CIF_PATH
 
 # %% PREPARE FOR FITTING
 # NOTE: There are a couple of steps here that require interaction and will time out if ignored
@@ -519,16 +764,16 @@ del za, a1, a2, uc, IMPORT_PATH, IMPORT_NAME, CIF_PATH
 #  specify the order of the first peak that is clearly visible
 lattice.fft_get_basis_vect(a1_order=1, a2_order=1, sigma=2)
 
-lattice.get_roi_mask_std(r=15, buffer=20, thresh=0.25, show_mask=True)
-# lattice.roi_mask = np.ones(image_cropped.shape)  # For pre-cropped images
+# lattice.get_roi_mask_std(r=15, buffer=20, thresh=0.25, show_mask=True)
+lattice.roi_mask = np.ones(image_cropped.shape)  # For pre-cropped images
 
 lattice.define_reference_lattice()
 
 # %% ATOM COLUMN FITTING
 
-# TODO: parallelization is broken in my current python environment; fix this at some point!
-lattice.fit_atom_columns(buffer=10, local_thresh_factor=0.1, use_background_param=False,
-                         use_bounds=True, use_circ_gauss=False, parallelize=True)
+lattice.fit_atom_columns(buffer=0, local_thresh_factor=0, use_background_param=True,
+                         use_bounds=True, use_circ_gauss=False, parallelize=True,
+                         peak_grouping_filter=None)
 
 # Must have only one column per projected unit cell.  If no sublattice meets this criteria,
 #  specify a specific column in the projected cell.
@@ -546,7 +791,9 @@ hr_img.plot_atom_column_positions(scatter_kwargs_dict={"s": 20}, scalebar_len_nm
                                   color_dict={"Ba": "#FF0060", "Ti/Zr": "#84BABA"},
                                   outlier_disp_cutoff=100, fit_or_ref="ref")
 
-# hr_img.plot_disp_vects()
+# %% PLOT DISPLACEMNT VECTORS
+
+hr_img.plot_disp_vects(sites_to_plot=["Ti/Zr"], arrow_scale_factor=2)
 
 # %% CREATE FRAME
 
@@ -556,69 +803,19 @@ frame = deepcopy(lattice.at_cols)
 frame.drop(["site_frac", "x", "y", "weight"], axis=1, inplace=True)  # We don't need these cols
 frame.reset_index(drop=True, inplace=True)
 
-normalize_intensity(frame, lattice.a_2d, n=24, method="score", kind="Ti/Zr")
-calculate_dispersion(frame)
-drop_elements(frame, ["Ba"])
-reject_outliers(frame)
+reject_outliers(frame, mode="total_col_int")
+normalize_intensity(frame, lattice.a_2d, n=8, method="global_minmax", kind="Ti/Zr")
+disp_calc(frame, normalize=True, kind="Ti/Zr")
+drop_elements(frame, ["Ba"])  # Doing this messes up the indexing in `neighborhood`
+# So we'll rebuild the neighborhood in the new indexing
+tree = grow_tree(frame, lattice.a_2d, "Ti/Zr")
+frame["neighborhood"] = frame.apply(lambda row: get_near_neighbors(row, frame, lattice.a_2d,
+                                                                   tree, n=8), axis=1)
 
-# %% PYSAL ANALYSIS -- GLOBAL MORAN'S I
+# %% PYSAL ANALYSIS
+sts = get_stats(frame, "queen", lattice.a_2d, kind="geary_local",
+                columns=["dot_normal_disp"], p=10000, printstats=True)
+add_stats_to_frame(frame, sts, "geary")
 
-mor_glb = moran_global(frame, "queen", lattice.a_2d, p=10000, printstats=True)
-
-# %% PYSAL ANALYSIS -- LOCAL MORAN'S I
-
-mor_lcl = moran_local(frame, "queen", lattice.a_2d, p=10000)
-add_stats_to_frame(frame, mor_lcl)
-
-plot_local_clusters(frame, image_cropped)
-
-# %% THICKNESS SERIES TESTING
-
-# I probably don't need this anymore, but I'll keep it for now
-
-# Select the correct B sites (the ones centered in full B site columns)
-# Then assign them their correct thicknesses
-
-# thickness_list = [1.6332, 2.4498, 2.8581, 3.2664, 3.6747, 4.4913, 4.8996, 5.3079, 5.7162, 6.5328,
-#                   6.9411, 7.3494, 7.7577, 8.5743, 8.9826, 9.3909, 9.7992, 10.6158, 11.0241,
-#                   11.4324, 11.8407, 12.6573, 13.0656, 13.4739, 13.8822, 14.6988, 15.1071, 15.5154,
-#                   15.9237, 16.7403, 17.1486, 17.5569, 17.9652, 18.7818, 19.1901, 19.5984, 20.0067,
-#                   20.8233, 21.6399, 22.8648, 23.6814, 24.9063, 25.7229, 26.9478]
-
-
-# def assign_sites(df, thickness_list, image_width=3, image_height=None, reps=4):
-#     if image_height is None:
-#         image_height = image_width
-#     df_new = deepcopy(df)
-#     # Min_u, max_v should be the top-leftmost B site
-#     df_new["selected"] = df_new.apply(lambda _: False, axis=1)
-#     df_new["est_thickness"] = df_new.apply(lambda _: False, axis=1)
-#     min_u, max_v = min(df_new["u"]), max(df_new["v"])
-#     initial_uvs = (min_u + 1, max_v - 1)
-#     for i, t in enumerate(thickness_list):
-#         u = initial_uvs[0] + i*image_width
-#         for j in range(reps):
-#             v = initial_uvs[1] - j*image_height
-#             df_new.loc[(df_new["u"] == u) & (df_new["v"] == v), "selected"] = True
-#             df_new.loc[(df_new["u"] == u) & (df_new["v"] == v), "est_thickness"] = t
-
-#     return df_new[df_new["selected"]]
-
-
-# bframe_subset = assign_sites(bframe, thickness_list)
-
-# ratio_dict = {}
-# stdev_dict = {}
-# for _, row in bframe_subset.iterrows():
-#     ratio_dict[row["est_thickness"]] = []
-# for _, row in bframe_subset.iterrows():
-#     ratio_dict[row["est_thickness"]].append(row["int_ratio"])
-# for key, values in ratio_dict.items():
-#     stdev_dict[key] = np.std(values)
-#     ratio_dict[key] = np.mean(values)
-
-# plt.plot(ratio_dict.keys(), ratio_dict.values(), "r-")
-# plt.fill_between(ratio_dict.keys(), [r-s for r, s in zip(ratio_dict.values(),
-#                                                          stdev_dict.values())],
-#                  [r+s for r, s in zip(ratio_dict.values(), stdev_dict.values())],
-#                  color='#ff000080')
+# %% PLOT GEARY
+plot_geary_clusters(frame, image_cropped, sig=0.05)

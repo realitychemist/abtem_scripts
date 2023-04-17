@@ -7,7 +7,7 @@ from scanning_drift_corr import SPmerge01linear as SP01
 from scanning_drift_corr import SPmerge02 as SP02
 from scanning_drift_corr import SPmerge03 as SP03
 
-from quickcrop import gui_crop
+import quickcrop.quickcrop as qc
 
 # %% IMPORT IMAGE FILES
 
@@ -58,7 +58,7 @@ image_final = image_final.astype(np.uint16)
 
 # %% CROP SQUARE
 
-image_cropped = gui_crop(image_final)
+image_cropped = qc.gui_crop(image_final)
 
 # %% EXPORT
 

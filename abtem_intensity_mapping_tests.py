@@ -23,80 +23,8 @@ from tqdm import tqdm
 from copy import deepcopy
 from random import seed, choices
 from typing import Dict
-
-# %% CUSTOM BUILD FUNCTIONS
-
-
-def randomize_chem(atoms: Atoms,
-                   replacements: Dict[str, Dict[str, float]],
-                   prseed: int = 42) -> Atoms:
-    """Randomize the chemistry of an ASE ``Atoms`` object via to user-defined replacement rules.
-
-    Parameters
-    ----------
-    atoms : Atoms
-        Initial ASE ``Atoms`` object.  A changed copy of this object will be returned.
-    replacements : Dict[str, Dict[str, float]]
-        Replacement dictionary.  The keys should be the symbols of the initial elements to replace,
-        and the values should themselves be dictionaries.  The value dicts should have keys which
-        are the elements that will replace the corresponding initial element, and the the values
-        should be floats representing the fraction of the initial element to replace with the given
-        element.  The sum of the floats must be <= 1 for each initial element.  For example:
-            >>> {"Ba": {"Sr": 1},
-            >>>  "Ti": {"Zr": 0.4,
-            >>>         "Nb": 0.05}}
-        would replace all Ba atoms in ``atoms`` with Sr, would randomly replace 40% of Ti atoms in
-        ``atoms`` with Zr, and randomly replace 5% (of the initial amount of Ti) with Nb.
-    prseed : int, optional
-        Pseudo-random seed.  The default is ``prms["seed"]``, the global pseudo-random seed for the
-        script.
-
-    Returns
-    -------
-    Atoms
-        ASE ``Atoms`` object based on ``atoms``, but with the specified elemental replacements.
-    """
-    seed(prseed)
-    new_atoms = deepcopy(atoms)
-
-    # Sanity check:
-    for elem, rep in replacements.items():
-        if sum(rep.values()) < 1:  # Add in the "NOP weights" (chance to not replace) if needed
-            rep[elem] = 1 - sum(rep.values())
-        assert sum(rep.values()) == 1  # If this is ever False, we're likely to get garbage results
-
-    symbols = new_atoms.get_chemical_symbols()
-    counts = dict(zip(set(symbols), [symbols.count(e) for e in set(symbols)]))
-
-    for elem, reps in replacements.items():
-        elem_idxs = [idx for idx, sym in enumerate(symbols) if sym == elem]
-        rep_with = choices(list(reps.keys()), weights=list(reps.values()), k=counts[elem])
-        for i in elem_idxs:
-            symbols[i] = rep_with.pop()
-
-    new_atoms.set_chemical_symbols(symbols)
-    return new_atoms
-
-
-def _gen_potentials(model):
-    return Potential(model,
-                     sampling=0.04,
-                     device="gpu",
-                     storage="cpu",
-                     projection="infinite",
-                     parametrization="kirkland",
-                     slice_thickness=1)
-
-
-def _gen_phonons(atoms, seed):
-    return FrozenPhonons(atoms,
-                         sigmas={"Ba": 0.0757,
-                                 "Ti": 0.0893,
-                                 "Zr": 0.1050,
-                                 "O":  0.0810},
-                         num_configs=10,
-                         seed=seed)
-
+from ase_funcs import randomize_chem
+import abtem_backend as backend
 
 # %% SETUP
 uc = Atoms("BaTiO3",
@@ -120,9 +48,8 @@ seeds = [87353, 39801, 56916, 62903, 76446, 40231, 92312, 43299, 72148, 37976,
          89435, 44210, 62350, 82493, 92909, 64157, 4272, 86548, 78072, 33308,
          44844, 59068, 71774, 9102, 15659, 15109, 51366, 28656, 53572, 81414]
 
-models = [randomize_chem(stack, {"Ti": {"Zr": 0.3}}, prseed=s) for s in seeds]
-models = [m * (2, 2, 1) for m in models]  # 2x2 needed to avoid probe wraparound
-# TODO: RERUN THE SIMS now that the random ordering is fixed, and remake the normals plot
+randomized_atoms = [randomize_chem(stack, {"Ti": {"Zr": 0.3}}, prseed=s) for s in seeds]
+randomized_atoms = [m * (2, 2, 1) for m in randomized_atoms]  # 2x2 needed to avoid probe wraparound
 
 # Frozen phonons for each model
 # No reason not to reuse the same seeds to generate the frozen phonons
@@ -148,7 +75,7 @@ detector = FlexibleAnnularDetector()
 
 with cupy.cuda.Device(1):
     measurements = []
-    for potential in tqdm(potentials, desc="Simulating", unit="cfg"):
+    for potential in potentials:
         probe.grid.match(potential)  # Could technically happen outside loop, but it's fast & works
         measurement = probe.scan(scan, [detector], potential, pbar=False)
         measurements.append(measurement)
