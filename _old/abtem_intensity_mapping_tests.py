@@ -81,7 +81,7 @@ with cupy.cuda.Device(1):
         measurements.append(measurement)
 
 # %% PICKLE MEASUREMENTS
-export_path = r"C:\Users\charles\Documents\GitHub\abtem_scripts\_output\BZT_meas_pickle"
+export_path = r"/abtem_scripts/_output/BZT_meas_pickle"
 if not os.path.exists(export_path):
     os.makedirs(export_path)
 
@@ -151,7 +151,7 @@ n, minmax, mean, var, skew, kurt = stats.describe(ratios)
 stats.probplot(ratios, plot=plt)  # Save this by hand for each probe
 
 # %% EXPORT DATA
-export_path = r"C:\Users\charles\Documents\GitHub\abtem_scripts\_output\BZT_stats_pickle"
+export_path = r"/abtem_scripts/_output/BZT_stats_pickle"
 if not os.path.exists(export_path):
     os.makedirs(export_path)
 
@@ -172,11 +172,11 @@ with open(os.path.join(export_path, export_bundle["label"]), "wb+") as outfile:
 
 # %% READ BACK STATS
 
-with open(r"C:\Users\charles\Documents\GitHub\abtem_scripts\_output\BZT_stats_pickle\BZT_30", "rb") as infile:
+with open(r"/abtem_scripts/_output/BZT_stats_pickle/BZT_30", "rb") as infile:
     import_30 = pickle.load(infile)
-with open(r"C:\Users\charles\Documents\GitHub\abtem_scripts\_output\BZT_stats_pickle\BZT_40", "rb") as infile:
+with open(r"/abtem_scripts/_output/BZT_stats_pickle/BZT_40", "rb") as infile:
     import_40 = pickle.load(infile)
-with open(r"C:\Users\charles\Documents\GitHub\abtem_scripts\_output\BZT_stats_pickle\BZT_50", "rb") as infile:
+with open(r"/abtem_scripts/_output/BZT_stats_pickle/BZT_50", "rb") as infile:
     import_50 = pickle.load(infile)
 
 imported_stats = [import_30, import_40, import_50]
