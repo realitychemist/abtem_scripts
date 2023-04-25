@@ -91,7 +91,7 @@ def get_near_neighbors(row: Series | DataFrame,
                        a2d: ndarray,
                        tree: KDTree,
                        n: int)\
-        -> list[int]:
+        -> list[int] | None:
     """
     Parameters
     ----------
@@ -186,7 +186,7 @@ def reject_outliers(df: DataFrame,
         df.reset_index(drop=True, inplace=True)
 
 
-def _dot_disp(row: Sequence | DataFrame,
+def _dot_disp(row: Series | DataFrame,
               df: DataFrame)\
         -> ndarray:
     neighbor_disps = list(map(array, [df.iloc[i]["disp"] for i in row["neighborhood"]]))
@@ -252,7 +252,7 @@ def drop_elements(df: DataFrame,
     df.reset_index(drop=True, inplace=True)
 
 
-def _global_minmax(row: Sequence | DataFrame,
+def _global_minmax(row: Series | DataFrame,
                    df: DataFrame,
                    kind: str | None)\
         -> float:
@@ -266,7 +266,7 @@ def _global_minmax(row: Sequence | DataFrame,
     return (site_intensity - min_int) / (max_int - min_int)
 
 
-def _ratio(row: Sequence | DataFrame,
+def _ratio(row: Series | DataFrame,
            df: DataFrame)\
         -> float:
     """Normalization mode for site intensity"""
@@ -275,7 +275,7 @@ def _ratio(row: Sequence | DataFrame,
     return site_intensity / mean(neighbor_intensities)
 
 
-def _standard_score(row: Sequence | DataFrame,
+def _standard_score(row: Series | DataFrame,
                     df: DataFrame)\
         -> float:
     """Normalization mode for site intensity"""
@@ -285,7 +285,7 @@ def _standard_score(row: Sequence | DataFrame,
     return (site_intensity - avg) / stdev
 
 
-def _off(row: Sequence | DataFrame)\
+def _off(row: Series | DataFrame)\
         -> float:
     """Normalization mode for site intensity (doesn't normalize, just returns)"""
     return row["total_col_int"]
@@ -343,7 +343,7 @@ def normalize_intensity(df: DataFrame,
 
 
 def _rookzone(df: DataFrame,
-              row: Sequence | DataFrame)\
+              row: Series | DataFrame)\
         -> list[int]:
     """Rook neighborhood zone shape:
         [(u-1, v), (u+1, v), (u, v+1), (u, v-1)]"""
@@ -356,7 +356,7 @@ def _rookzone(df: DataFrame,
 
 
 def _bishopzone(df: DataFrame,
-                row: Sequence | DataFrame)\
+                row: Series | DataFrame)\
         -> list[int]:
     """Bishop neighborhood zone shape:
         [(u+1, v+1), (u-1, v-1), (u+1, v-1), (u-1, v+1)]"""
@@ -369,7 +369,7 @@ def _bishopzone(df: DataFrame,
 
 
 def _120zone(df: DataFrame,
-             row: Sequence | DataFrame,
+             row: Series | DataFrame,
              a2d: ndarray)\
         -> list[int]:
     """Sepecial neighborhood zone shape for perovskite 120 zone axis:
