@@ -474,6 +474,7 @@ def simulate_packbed_thickness_series(models: list[Model],
 
     # Free the GPU memory for others; if this isn't done, GPU memory is only freed when the Python kernel is reset
     if potential_prms.device == "gpu" or probe_prms.device == "gpu":
+        # noinspection PyUnboundLocalVariable
         free_gpu_memory(mempool, pinned_mempool)
     return results
 
@@ -587,5 +588,6 @@ def sim_stem(models: list[Model],
                                       measurements))
     # Free the GPU memory for others; if this isn't done, GPU memory is only freed when the Python kernel is reset
     if potential_prms.device == "gpu" or probe_prms.device == "gpu":
+        # noinspection PyUnboundLocalVariable
         free_gpu_memory(mempool, pinned_mempool)
     return results

@@ -20,7 +20,7 @@ def randomize_chem(atoms: Atoms,
     replacements : Dict[str, Dict[str, float]]
         Replacement dictionary.  The keys should be the symbols of the initial elements to replace,
         and the values should themselves be dictionaries.  The value dicts should have keys which
-        are the elements that will replace the corresponding initial element, and the the values
+        are the elements that will replace the corresponding initial element, and the values
         should be floats representing the fraction of the initial element to replace with the given
         element.  The sum of the floats must be <= 1 for each initial element.  For example:
             >>> {"Ba": {"Sr": 1},
