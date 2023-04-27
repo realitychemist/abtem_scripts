@@ -9,7 +9,7 @@
 import os
 import numpy as np
 import tifffile as tif
-import SingleOrigin.SingleOrigin as so
+import SingleOrigin as so
 from copy import deepcopy
 
 

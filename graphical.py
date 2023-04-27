@@ -1,18 +1,23 @@
 from pathlib import Path
 from tkinter import Tk
-from tkinter.filedialog import askopenfilename, asksaveasfilename
+from tkinter.filedialog import askopenfilename, asksaveasfilename, askdirectory
 from ase import Atoms
 from typing import Literal
-from abtem import Measurement
+from numpy import ndarray
 
 
-def gui_get_path() -> Path:
+def gui_get_path(is_file: bool = True)\
+        -> Path:
+    """Get a path via a native GUI; is_file sets whether to return the path to a file (True) or a directory (False)."""
     root = Tk()
     # Using root.after to ensure the window pops in front of editors
     root.after(300, root.focus_force)
     root.after(333, root.withdraw)
-
-    return Path(askopenfilename(parent=root))
+    if is_file:
+        p = Path(askopenfilename(parent=root))
+    else:  # is_directory
+        p = Path(askdirectory(parent=root))
+    return p
 
 
 def gui_open(ffmt: Literal["cif", "extxyz", "xyz", "vasp", "poscar"])\
@@ -46,12 +51,14 @@ def gui_open(ffmt: Literal["cif", "extxyz", "xyz", "vasp", "poscar"])\
     return atoms
 
 
-def gui_savetiff(meas: Measurement):
+def gui_savetiff(img: ndarray,
+                 default_fname: str | None = None)\
+        -> None:
     from tifffile import imwrite
     root = Tk()
     # Using root.after to ensure the window pops in front of editors
     root.after(300, root.focus_force)
     root.after(333, root.withdraw)
 
-    fname = asksaveasfilename(confirmoverwrite=True, parent=root)
-    imwrite(fname, meas.array, photometric='minisblack')
+    fname = asksaveasfilename(confirmoverwrite=True, parent=root, initialfile=default_fname)
+    imwrite(fname, img, photometric='minisblack')

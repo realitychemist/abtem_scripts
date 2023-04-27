@@ -10,9 +10,8 @@ from tifffile import imwrite
 import re
 import SingleOrigin as so
 import scanning_drift_corr.api as sdc
-# from SPcalibration import SPcalibration  # Need Steve's calibration script
 
-# %% CHOOSE WORKING DIRECTORY
+
 print('Select source folder')
 source_folder = PyQt5.QtWidgets.QFileDialog.getExistingDirectory()
 
