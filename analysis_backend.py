@@ -1,4 +1,6 @@
 from collections.abc import Sequence
+# noinspection PyUnresolvedReferences
+import cmasher as cmr  # Gets flagged incorrectly without noinspection, since the colormap is accessed via string
 from copy import deepcopy
 from typing import Literal
 from esda import Moran, Moran_Local, Moran_BV, Moran_Local_BV, Geary, Geary_Local, Geary_Local_MV
@@ -142,7 +144,7 @@ def _test_outliers(x: float,
                    med: ndarray,
                    mad: float,
                    outlier_scale: float)\
-        -> float | NaN:
+        -> float | type(NaN):
     """Returns NaN if x is an outlier, else returns x"""
     if abs(x - med) > outlier_scale*mad:
         return NaN
