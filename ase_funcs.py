@@ -1,7 +1,7 @@
 import rle
 from sys import maxsize
 from ase import Atom, Atoms
-from random import randint, seed, choices
+from random import randint, seed, shuffle
 from copy import deepcopy
 from itertools import combinations_with_replacement, permutations
 from collections.abc import Generator
@@ -39,18 +39,38 @@ def randomize_chem(atoms: Atoms,
     seed(prseed)
     new_atoms = deepcopy(atoms)
 
-    # Sanity check:
-    for elem, rep in replacements.items():
-        if sum(rep.values()) < 1:  # Add in the "NOP weights" (chance to not replace) if needed
-            rep[elem] = 1 - sum(rep.values())
-        assert sum(rep.values()) == 1  # If this is ever False, we're likely to get garbage results
+    # Add in NOP weights and then sanity check
+    for elem, reps in replacements.items():
+        if sum(reps.values()) < 1:  # Add in the "NOP weights" (chance to not replace) if needed
+            reps[elem] = 1 - sum(reps.values())
+        if sum(reps.values()) != 1:  # If this is ever False, we're likely to get garbage results
+            raise RuntimeError(f"Sum of rep values ({sum(reps.values())}) not equal to 1!")
 
     symbols = new_atoms.get_chemical_symbols()
-    counts = dict(zip(set(symbols), [symbols.count(e) for e in set(symbols)]))
+    uniques = list(set(symbols))  # Since set iteration order is not guaranteed, cast back to a list
+    counts = dict(zip(uniques, [symbols.count(e) for e in uniques]))
 
     for elem, reps in replacements.items():
         elem_idxs = [idx for idx, sym in enumerate(symbols) if sym == elem]
-        rep_with = choices(list(reps.keys()), weights=list(reps.values()), k=counts[elem])
+        k = counts[elem]
+        rep_counts = [round(k*w) for w in reps.values()]
+        n = sum(rep_counts)
+
+        while n != k:  # Counts may be off due to cumulative rounding error
+            diffs = [c/k - w for w, c in zip(reps.values(), rep_counts)]
+            if n < k:  # Since we have too few reps, we want to add one to the most negative diff
+                mindex = diffs.index(min(diffs))
+                rep_counts[mindex] = rep_counts[mindex] + 1
+            elif n > k:  # Since we have too many reps, we want to remove one from the most positive diff
+                maxdex = diffs.index(max(diffs))
+                rep_counts[maxdex] = rep_counts[maxdex] - 1
+            n = sum(rep_counts)
+
+        rep_with = [x for sublist in  # Outer list comprehension to make sure we get a flat list
+                    [[e]*c for e, c in zip(reps.keys(), rep_counts)]
+                    for x in sublist]
+        shuffle(rep_with)  # Now the only random step in this whole process is the shuffle
+
         for i in elem_idxs:
             symbols[i] = rep_with.pop()
 
