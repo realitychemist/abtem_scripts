@@ -1,6 +1,7 @@
 from pathlib import Path
 from tkinter import Tk
 from tkinter.filedialog import askopenfilename, asksaveasfilename, askdirectory
+from tkinter.messagebox import askokcancel
 from ase import Atoms
 from typing import Literal
 from numpy import ndarray
@@ -62,3 +63,20 @@ def gui_savetiff(img: ndarray,
 
     fname = asksaveasfilename(confirmoverwrite=True, parent=root, initialfile=default_fname)
     imwrite(fname, img, photometric='minisblack')
+
+
+def gui_wait_for_user(title: str | None = None,
+                      msg: str | None = None)\
+        -> bool:
+    root = Tk()
+    # Using root.after to ensure the window pops in front of editors
+    root.after(300, root.focus_force)
+    root.after(333, root.withdraw)
+
+    if title is None:
+        title = "Continue"
+    if msg is None:
+        msg = "Press OK to continue"
+
+    ans = askokcancel(title=title, message=msg, parent=root)
+    return ans
