@@ -2,6 +2,7 @@ from collections.abc import Sequence
 # noinspection PyUnresolvedReferences
 import cmasher as cmr  # Gets flagged incorrectly without noinspection, since the colormap is accessed via string
 from copy import deepcopy
+from pathlib import Path
 from typing import Literal
 from esda import Moran, Moran_Local, Moran_BV, Moran_Local_BV, Geary, Geary_Local, Geary_Local_MV
 from libpysal import weights
@@ -9,6 +10,7 @@ from libpysal.weights import W
 from matplotlib import pyplot as plt
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize, Colormap, to_rgba, to_rgb
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.lines import Line2D
 from numpy import ndarray, outer, asarray, isclose, NaN, median, isnan, array, sum, dot, mean, std
 from numpy.linalg import linalg
@@ -134,6 +136,8 @@ def get_near_neighbors(row: Series | DataFrame,
         if len(match) != 1:
             raise RuntimeError("No near-neighbor (u, v) matches found; this shouldn't happen!")
         neighborhood.append(match.index[0])
+    # For some reason this in including rows as neighbors of themselves; remove them
+    neighborhood = neighborhood[1:]
     # Sometimes we find no neighbors if the column was fit poorly; just throw it out
     if not neighborhood:
         neighborhood = None
@@ -296,7 +300,7 @@ def _off(row: Series | DataFrame)\
 def normalize_intensity(df: DataFrame,
                         a2d: ndarray,
                         n: int = 4,
-                        method: Literal["Ratio", "standard_score", "off", "global_minmax"] | None = "ratio",
+                        method: Literal["ratio", "standard_score", "off", "global_minmax"] | None = "ratio",
                         kind: str | None = None)\
         -> None:
     """
@@ -333,7 +337,7 @@ def normalize_intensity(df: DataFrame,
     match method:
         case "ratio":
             df["norm_int"] = df.apply(lambda row: _ratio(row, df), axis=1)
-        case "standard score" | "score":
+        case "standard_score" | "score":
             df["norm_int"] = df.apply(lambda row: _standard_score(row, df), axis=1)
         case "off" | None:
             df["norm_int"] = df.apply(lambda row: _off(row), axis=1)
@@ -590,7 +594,7 @@ def get_stats(df: DataFrame,
                 # noinspection PyTypeChecker
                 stat_blob = Geary(vals, w, permutations=p)
                 if printstats:
-                    print(f"Global Gear's C':     {round(stat_blob.C, 5)}\n"
+                    print(f"Global Geary's C':     {round(stat_blob.C, 5)}\n"
                           f"Expected C for CSR:  {round(stat_blob.EC_sim, 5)}\n"
                           f"p-value ({p} perms.): {round(stat_blob.p_sim, 5)}")
                     if stat_blob.p_sim < 0.05:
@@ -648,147 +652,294 @@ def add_stats_to_frame(df: DataFrame,
                 df["geary_label"] = sts.labs
 
 
+def _false_discovery_rate(df: DataFrame,
+                          kind: Literal["moran", "geary"],
+                          a: float)\
+        -> None:
+    if kind == "moran":
+        _ps = list(df["moran_p"])
+    elif kind == "geary":
+        _ps = list(df["geary_p"])
+    else:
+        raise ValueError("Invalid kind")
+
+    # SORT BY P
+    # ITERATE TO FIND LARGEST
+    # ITERATE TO SET 0 or 1
+    # RE-SORT BY ORIGINAL INDEX
+
+    ps = {i: p for i, p in enumerate(_ps)}
+    sorted_ps = {k: v for k, v in sorted(ps.items(), key=lambda item: item[1])}
+    n = len(ps)
+    largest = 0
+    for i, p in enumerate(sorted_ps.values()):
+        if p <= i/n * a:
+            largest = i
+    for i, key in enumerate(sorted_ps.keys()):
+        if i <= largest:
+            sorted_ps[key] = 1
+        else:
+            sorted_ps[key] = 0
+    unsorted_ps = {k: v for k, v in sorted(sorted_ps.items(), key=lambda item: [item[0]])}
+    fdr = list(unsorted_ps.values())
+
+    df["fdr_keep"] = fdr
+
+
 def _moran_cluster_members(df: DataFrame,
-                           sig: float):
-    core_members = {i for i, p in enumerate(df["moran_p"]) if (p <= sig)}
+                           sig: float,
+                           fdr: bool):
+    if fdr:
+        _false_discovery_rate(df, "moran", sig)
+        core_members = {i for i, (keep, lab) in enumerate(zip(df["fdr_keep"], df["moran_quad"]))
+                        if (keep == 1) & (lab in [1, 3])}
+    else:
+        core_members = {i for i, (p, lab) in enumerate(zip(df["moran_p"], df["moran_quad"]))
+                        if (p <= sig) & lab in ([1, 3])}
     members = set(core_members)
-    for m in core_members:
-        members.update(df.iloc[m]["neighborhood"])
+    # for m in core_members:
+    #     members.update(df.iloc[m]["neighborhood"])
+    # TODO: Testing with just core members, not sure if extending to whole neighborhood actually makes sense
     return members
 
 
 def plot_moran_clusters(df: DataFrame,
                         img: ndarray,
+                        kind: str | list[str],
                         var_cmap: str | Colormap = plt.get_cmap("cmr.amber"),
                         image_cmap: str | Colormap = "bone",
-                        sig: float = 0.05)\
+                        sig: float = 0.05,
+                        savepath: None | str | Path = None,
+                        fdr: bool = False)\
         -> None:
-    # plt.style.use("dark_background")  # For testing, because it's easier to look at on a screen
-    plt.style.use("seaborn-v0_8-colorblind")
-    # Mappers for colorizing the voronoi plots
-    norm = Normalize(vmin=0, vmax=1, clip=True)
-    mapper = ScalarMappable(norm=norm, cmap=var_cmap)
-
-    fig, axs = plt.subplots(1, 2, gridspec_kw={'width_ratios': [1.17, 1]})
-    fig.tight_layout()
-    plt.subplots_adjust(wspace=0.02, hspace=0)
-
-    axs[0].set_title("Normalized Locally Correlated Displacement")
-    fig.colorbar(mapper, ax=axs[0], location="left", fraction=0.04, pad=0.02)
-    axs[1].set_title("Clusters")
-
-    # Each set of axes gets an image
-    for ax in axs:
-        ax.imshow(img, cmap=image_cmap)
-        ax.axis("off")
-        # Set limits to keep them from being distorted by the voronoi polygons
-        ax.set_xlim(left=0, right=img.shape[0])
-        ax.set_ylim(bottom=img.shape[1], top=0)
+    # %===% Setup %===%
+    if type(kind) == str:
+        kind = [kind]  # Wrap kind if receiving a bare string
 
     xs, ys = df["x_fit"], df["y_fit"]
     # noinspection PyTypeChecker
     vor = Voronoi([(x, y) for x, y in zip(xs, ys)])
 
-    cluster_members = _moran_cluster_members(df, sig)
-    # Colorize the voronoi cells
+    cluster_members = _moran_cluster_members(df, sig=sig, fdr=fdr)
+
+    # Mappers for colorizing the voronoi plots
+    mappers = {}
+    for k in kind:
+        norm = Normalize(vmin=min(df[k]), vmax=max(df[k]), clip=True)
+        mapper = ScalarMappable(norm=norm, cmap=var_cmap)
+        mappers[k] = mapper
+
+    # %===% Plot %===%
+    # plt.style.use("dark_background")  # For testing, because it's easier to look at on a screen
+    plt.style.use("seaborn-v0_8-colorblind")
+
+    fig, axs = plt.subplots(1, len(kind)+1, figsize=(12, 6))  # We need one extra subplot for clusters
+    fig.tight_layout()
+    plt.subplots_adjust(wspace=0.2, hspace=0)
+
+    # Take care of the final axis, which plots cluster members
+    axs[-1].imshow(img, cmap=image_cmap)
+    axs[-1].axis("off")
+    axs[-1].set_xlim(left=0, right=img.shape[0])
+    axs[-1].set_ylim(bottom=img.shape[1], top=0)
+    axs[-1].set_title("Cluster Members")
+
+    for ax, k in zip(axs[:-1], kind):
+        im = ax.imshow(img, cmap=image_cmap)
+        ax.axis("off")
+        # Set limits to keep them from being distorted by the voronoi polygons
+        ax.set_xlim(left=0, right=img.shape[0])
+        ax.set_ylim(bottom=img.shape[1], top=0)
+        _add_colorbar(im, mappers[k])
+
     for r in range(len(vor.point_region)):
         region = vor.regions[vor.point_region[r]]
         if -1 not in region:
             polygon = [vor.vertices[i] for i in region]
-            axs[0].fill(*zip(*polygon),
-                        color=mapper.to_rgba(df.iloc[r]["dot_normal_disp"]), alpha=0.5)
+            for ax, k in zip(axs[:-1], kind):
+                ax.fill(*zip(*polygon),
+                        color=mappers[k].to_rgba(df.iloc[r][k]), alpha=0.5)
+
             if r in cluster_members:
-                if df.iloc[r]["moran_quad"] in {1, 4}:
-                    clust_kind = to_rgba("goldenrod", alpha=0.5)
-                elif df.iloc[r]["moran_quad"] in {2, 3}:
-                    clust_kind = to_rgba("maroon", alpha=0.5)
+                if df.iloc[r]["moran_quad"] == 1:
+                    c = "goldenrod"
+                elif df.iloc[r]["moran_quad"] == 3:
+                    c = "maroon"
                 else:
-                    clust_kind = to_rgba("black", alpha=0.5)
-                axs[1].fill(*zip(*polygon), c=clust_kind)
-            else:
-                axs[1].fill(*zip(*polygon), c=(0.1, 0.05, 0.05, 0.5))
-    for ax in axs:
-        ax.quiver(xs, ys, df["disp"].str[0], df["disp"].str[1], color="#C0C0C0")
+                    raise ValueError("Logically excluded value present")
+                axs[-1].fill(*zip(*polygon), color=c, alpha=0.5)
+
+    for ax, k in zip(axs[:-1], kind):
+        match k:
+            case "total_col_int":
+                ax.set_title("Total Column Intensity")
+            case "norm_int":
+                ax.set_title("Normalized Column Intensity")
+            case "dot_normal_disp":
+                ax.set_title("Normalized Locally Correlated Displacement")
+                ax.quiver(xs, ys, df["disp"].str[0], df["disp"].str[1], color="#C0C0C0")
+                ax.quiver(xs, ys, df["disp"].str[0], df["disp"].str[1], color="#C0C0C0")
+
+    if len(kind) == 1:  # Univariate
+        legend_elements = [Line2D([0], [0], marker="o", linestyle="none", markeredgecolor="none",
+                                  markerfacecolor="goldenrod",
+                                  label="High Cluster Member"),
+                           Line2D([0], [0], marker="o", linestyle="none", markeredgecolor="none",
+                                  markerfacecolor="maroon",
+                                  label="Low Cluster Member")]
+    else:  # Multivariate
+        legend_elements = [Line2D([0], [0], marker="o", linestyle="none", markeredgecolor="none",
+                                  markerfacecolor="goldenrod",
+                                  label="Cluster Member")]
+
+    axs[-1].legend(handles=legend_elements, bbox_to_anchor=(0.5, -0.20), loc="lower center")
+
+    if savepath is not None:
+        plt.savefig(savepath, dpi=300)
+    plt.show()
 
 
 def _geary_cluster_members(df: DataFrame,
-                           sig: float)\
+                           sig: float,
+                           mv: bool,
+                           fdr: bool)\
         -> set[int]:
-    core_members = {i for i, (p, c) in enumerate(zip(df["geary_p"], df["geary_C"]))
-                    if (p <= sig) & (c <= 2)}  # 2 is the expected value of Ci
-    members = deepcopy(core_members)
-    for m in core_members:
-        members.update(df.iloc[m]["neighborhood"])
-    return members
+    if fdr:
+        _false_discovery_rate(df, "geary", sig)
+        if not mv:
+            core_members = {i for i, (keep, lab) in enumerate(zip(df["fdr_keep"], df["geary_label"]))
+                            if (keep == 1) & (lab in [2.0, 3.0])}
+        else:
+            core_members = {i for i, (keep, c) in enumerate(zip(df["fdr_keep"], df["geary_C"]))
+                            if (keep == 1) & (c < 2)}
+    else:
+        if not mv:
+            core_members = {i for i, (p, lab) in enumerate(zip(df["geary_p"], df["geary_label"]))
+                            if (p <= sig) & (lab in [2.0, 3.0])}
+        else:
+            core_members = {i for i, (p, c) in enumerate(zip(df["geary_p"], df["geary_C"]))
+                            if (p <= sig) & (c < 2)}
+    # members = deepcopy(core_members)
+    # for m in core_members:
+    #     members.update(df.iloc[m]["neighborhood"])
+    # TODO: Testing with just core members, not sure if extending to whole neighborhood actually makes sense
+    return core_members
+
+
+def _add_colorbar(mappable, mapper=None):
+    last_axes = plt.gca()
+    ax = mappable.axes
+    fig = ax.figure
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.05)
+    if mapper is not None:
+        cbar = fig.colorbar(mapper, cax=cax)
+    else:
+        cbar = fig.colorbar(mappable, cax=cax)
+    plt.sca(last_axes)
+    return cbar
 
 
 def plot_geary_clusters(df: DataFrame,
                         img: ndarray,
-                        sig: float = 0.05,
+                        kind: str | list[str],
                         var_cmap: str | Colormap = plt.get_cmap("cmr.amber"),
-                        image_cmap: str | Colormap = "bone")\
+                        image_cmap: str | Colormap = "bone",
+                        sig: float = 0.05,
+                        savepath: None | str | Path = None,
+                        fdr: bool = False)\
         -> None:
-    # plt.style.use("dark_background")  # For testing, because it's easier to look at on a screen
-    plt.style.use("seaborn-v0_8-colorblind")
-    # Mappers for colorizing the voronoi plots
-    norm = Normalize(vmin=0, vmax=1, clip=True)
-    mapper = ScalarMappable(norm=norm, cmap=var_cmap)
-
-    fig, axs = plt.subplots(1, 3, width_ratios=[1.068, 1, 1])
-    fig.tight_layout()
-    plt.subplots_adjust(wspace=0.02, hspace=0)
-
-    axs[0].set_title("Normalized Intensity")
-    fig.colorbar(mapper, ax=axs[0], location="left", fraction=0.04, pad=0.02)
-    axs[1].set_title("Normalized Locally Correlated Displacement")
-    axs[2].set_title("Multivariate Clusters")
-
-    # Each set of axes gets an image
-    for ax in axs:
-        ax.imshow(img, cmap=image_cmap)
-        ax.axis("off")
-        # Set limits to keep them from being distorted by the voronoi polygons
-        ax.set_xlim(left=0, right=img.shape[0])
-        ax.set_ylim(bottom=img.shape[1], top=0)
-
-    cluster_members = _geary_cluster_members(df, sig=sig)
-    disp_upper, disp_lower = (mean(df["dot_normal_disp"]), mean(df["dot_normal_disp"]))
+    # %===% Setup %===%
+    if type(kind) == str:
+        kind = [kind]  # Wrap kind if receiving a bare string
 
     xs, ys = df["x_fit"], df["y_fit"]
     # noinspection PyTypeChecker
     vor = Voronoi([(x, y) for x, y in zip(xs, ys)])
 
-    # Colorize the voronoi cells
+    # This gets the right cluster members because p & c are set during the earlier fitting step
+    # So getting cluster members doesn't actually depend on kind
+    if len(kind) == 1:
+        mv = False
+    else:
+        mv = True
+    cluster_members = _geary_cluster_members(df, sig=sig, mv=mv, fdr=fdr)
+
+    # Mappers for colorizing the voronoi plots
+    mappers = {}
+    for k in kind:
+        norm = Normalize(vmin=min(df[k]), vmax=max(df[k]), clip=True)
+        mapper = ScalarMappable(norm=norm, cmap=var_cmap)
+        mappers[k] = mapper
+
+    # %===% Plot %===%
+    # plt.style.use("dark_background")  # For testing, because it's easier to look at on a screen
+    plt.style.use("seaborn-v0_8-colorblind")
+
+    fig, axs = plt.subplots(1, len(kind)+1, figsize=(12, 6))  # We need one extra subplot for clusters
+    fig.tight_layout()
+    plt.subplots_adjust(wspace=0.2, hspace=0)
+
+    # Take care of the final axis, which plots cluster members
+    axs[-1].imshow(img, cmap=image_cmap)
+    axs[-1].axis("off")
+    axs[-1].set_xlim(left=0, right=img.shape[0])
+    axs[-1].set_ylim(bottom=img.shape[1], top=0)
+    axs[-1].set_title("Cluster Members")
+
+    for ax, k in zip(axs[:-1], kind):
+        im = ax.imshow(img, cmap=image_cmap)
+        ax.axis("off")
+        # Set limits to keep them from being distorted by the voronoi polygons
+        ax.set_xlim(left=0, right=img.shape[0])
+        ax.set_ylim(bottom=img.shape[1], top=0)
+        _add_colorbar(im, mappers[k])
+
     for r in range(len(vor.point_region)):
         region = vor.regions[vor.point_region[r]]
         if -1 not in region:
             polygon = [vor.vertices[i] for i in region]
-            axs[0].fill(*zip(*polygon),
-                        color=mapper.to_rgba(df.iloc[r]["norm_int"]), alpha=0.5)
-            axs[1].fill(*zip(*polygon),
-                        color=mapper.to_rgba(df.iloc[r]["dot_normal_disp"]), alpha=0.5)
+            for ax, k in zip(axs[:-1], kind):
+                ax.fill(*zip(*polygon),
+                        color=mappers[k].to_rgba(df.iloc[r][k]), alpha=0.5)
 
             if r in cluster_members:
-                if df.iloc[r]["dot_normal_disp"] >= disp_upper:
-                    clust_kind = (*to_rgb("goldenrod"), 0.5)
-                elif df.iloc[r]["dot_normal_disp"] < disp_lower:
-                    clust_kind = (*to_rgb("maroon"), 0.5)
-            else:
-                clust_kind = (0, 0, 0, 0.5)
-            # noinspection PyUnboundLocalVariable
-            axs[2].fill(*zip(*polygon), color=clust_kind)
+                if len(kind) == 1:  # Univariate ==> classify clusters
+                    cutoff = mean(df[kind[0]])
+                    if df.iloc[r][kind[0]] >= cutoff:
+                        c = "goldenrod"
+                    else:
+                        c = "maroon"
+                    axs[-1].fill(*zip(*polygon), color=c, alpha=0.5)
 
-    # Add arrows to the displacement plot
-    axs[1].quiver(xs, ys, df["disp"].str[0], df["disp"].str[1], color="#C0C0C0")
-    axs[2].quiver(xs, ys, df["disp"].str[0], df["disp"].str[1], color="#C0C0C0")
+                else:  # Multivariate ==> unclassified clusters
+                    axs[-1].fill(*zip(*polygon), color="goldenrod", alpha=0.5)
 
-    # Legend for the cluster plot
-    legend_elements = [Line2D([0], [0], marker="o", linestyle="none", markeredgecolor="none",
-                              markerfacecolor="goldenrod",
-                              label="Polar Cluster"),
-                       Line2D([0], [0], marker="o", linestyle="none", markeredgecolor="none",
-                              markerfacecolor="maroon",
-                              label="Non-Polar Cluster")]
-    axs[2].legend(handles=legend_elements, bbox_to_anchor=(0.5, -0.20), loc="lower center")
+    for ax, k in zip(axs[:-1], kind):
+        match k:
+            case "total_col_int":
+                ax.set_title("Total Column Intensity")
+            case "norm_int":
+                ax.set_title("Normalized Column Intensity")
+            case "dot_normal_disp":
+                ax.set_title("Normalized Locally Correlated Displacement")
+                ax.quiver(xs, ys, df["disp"].str[0], df["disp"].str[1], color="#C0C0C0")
+                ax.quiver(xs, ys, df["disp"].str[0], df["disp"].str[1], color="#C0C0C0")
 
+    if len(kind) == 1:  # Univariate
+        legend_elements = [Line2D([0], [0], marker="o", linestyle="none", markeredgecolor="none",
+                                  markerfacecolor="goldenrod",
+                                  label="High Cluster Member"),
+                           Line2D([0], [0], marker="o", linestyle="none", markeredgecolor="none",
+                                  markerfacecolor="maroon",
+                                  label="Low Cluster Member")]
+    else:  # Multivariate
+        legend_elements = [Line2D([0], [0], marker="o", linestyle="none", markeredgecolor="none",
+                                  markerfacecolor="goldenrod",
+                                  label="Cluster Member")]
+
+    axs[-1].legend(handles=legend_elements, bbox_to_anchor=(0.5, -0.20), loc="lower center")
+
+    if savepath is not None:
+        plt.savefig(savepath, dpi=300)
     plt.show()

@@ -3,11 +3,12 @@ from os import PathLike
 from pathlib import Path
 from typing import Literal, Sequence
 
-from abtem import Probe, GridScan, Measurement
+from abtem import Probe, GridScan, Measurement, SMatrix
 from abtem.structures import orthogonalize_cell
 from ase import Atoms
 from ase.io import cif
-from abtem.detect import PixelatedDetector, FlexibleAnnularDetector, SegmentedDetector, AnnularDetector
+from abtem.detect import (PixelatedDetector, FlexibleAnnularDetector, SegmentedDetector, AnnularDetector,
+                          AbstractDetector)
 from abtem.potentials import Potential
 from abtem.temperature import FrozenPhonons
 from numpy import ndarray, linalg, pi, sin, cos, degrees
@@ -84,6 +85,8 @@ class ProbeParameters:
         The semiangle of convergence of the probe, mrad (default=17.9)
     device
         Either "gpu" (to run the simulation on the GPU) or "cpu" (to run on the CPU)
+    storage
+        Either "gpu" (to store data in the GPU) or "cpu" (to store in the CPU)
     tilt_mag
         The probe tilt, mrad (default=0)
     tilt_rot
@@ -107,6 +110,7 @@ class ProbeParameters:
     energy: float = 200E3
     convergence: float = 17.9
     device: Literal["gpu", "cpu"] = "gpu"
+    storage: Literal["gpu", "cpu"] = "gpu"
     tilt_mag: float = 0
     tilt_rot: float = 0
     defocus: float = 0
@@ -177,7 +181,7 @@ class DetectorBuilder:
                                  save_file=self._save_file_name("pixelated"))
 
     def get_flexible(self):
-        return FlexibleAnnularDetector(save_file=self._save_file_name("flex"))
+        return FlexibleAnnularDetector(step_size=1, save_file=self._save_file_name("flex"))
 
 
 @dataclass
@@ -257,14 +261,15 @@ class STEMResult:
     potential_params: PotentialParameters
     probe_params: ProbeParameters
     grid: GridScan
-    measurement: Measurement | list[Measurement]
+    measurement: Measurement | list[Measurement] | dict[AbstractDetector: Measurement]
     images: list[ndarray] | None = None
 
     def __post_init__(self):
-        # TODO: This isn't working for some reason
         images = []
-        if type(self.measurement) is not list:
+        if type(self.measurement) not in [list, dict]:
             self.measurement = [self.measurement]
+        if type(self.measurement) is dict:
+            self.measurement = [v for v in self.measurement.values()]
         for meas in self.measurement:
             if len(meas.array.shape) == 2:
                 images.append(meas.array)
@@ -272,7 +277,7 @@ class STEMResult:
             self.images = images
 
 
-def gen_potentials(model: Atoms,
+def gen_potentials(model: Atoms | FrozenPhonons,
                    prms: PotentialParameters)\
         -> Potential:
     """Wrapper for generating abTEM Potentials"""
@@ -511,7 +516,9 @@ def sim_stem(models: list[Model],
              det: DetectorBuilder,
              potential_prms: PotentialParameters,
              probe_prms: ProbeParameters,
-             kinds: list[Literal["flex", "flexible", "haadf", "df4", "dpc", "seg", "segmented"]] = None)\
+             kinds: list[Literal["flex", "flexible", "haadf", "df4", "dpc", "seg", "segmented"]] = None,
+             devnum: Literal[0, 1] = 1,
+             prisim: bool = False)\
         -> list[STEMResult]:
     """Run a standard STEM simulation with a given model (or list of models)
 
@@ -524,6 +531,7 @@ def sim_stem(models: list[Model],
     potential_prms
     probe_prms
     kinds
+    devnum
 
     Returns
     -------
@@ -531,63 +539,66 @@ def sim_stem(models: list[Model],
     """
     if kinds is None:
         kinds = ["flex"]
-    if potential_prms.device == "gpu" or probe_prms.device == "gpu":
-        dev, mempool, pinned_mempool = gpu_setup(0)
-    else:
-        dev = Device()  # Default is None, which I believe sets the device to the CPU
 
-    with dev:
-        detectors = []
-        for k in kinds:
-            if k in ["flex", "flexible"]:
-                detectors.append(det.get_flexible())
-            elif k in ["haadf"]:
-                detectors.append(det.get_haadf())
-            elif k in ["df4", "dpc", "seg", "segmented"]:
-                detectors.append(det.get_df4())
-            else:
-                raise ValueError("Unknown simulation kind; see the documentation")
+    detectors = []
+    for k in kinds:
+        if k in ["flex", "flexible"]:
+            detectors.append(det.get_flexible())
+        elif k in ["haadf"]:
+            detectors.append(det.get_haadf())
+        elif k in ["df4", "dpc", "seg", "segmented"]:
+            detectors.append(det.get_df4())
+        else:
+            raise ValueError("Unknown simulation kind; see the documentation")
 
-        results: list[STEMResult] = []
-        for model in models:
+    results: list[STEMResult] = []
+
+    for model in models:
+
+
+        if potential_prms.device == "gpu" or probe_prms.device == "gpu":
+            dev, mempool, pinned_mempool = gpu_setup(devnum)
+        else:
+            dev = Device()  # Default is None, which I believe sets the device to the CPU
+        if prisim:
+            probe = SMatrix(energy=probe_prms.energy,
+                            semiangle_cutoff=probe_prms.convergence,
+                            expansion_cutoff=probe_prms.convergence*1.2,
+                            tilt=probe_prms.tilt,
+                            interpolation=2,
+                            device=probe_prms.device,
+                            storage=probe_prms.storage)
+        else:
             probe = Probe(energy=probe_prms.energy,
                           semiangle_cutoff=probe_prms.convergence,
                           device=probe_prms.device,
                           tilt=probe_prms.tilt)
 
-            probe.ctf.set_parameters({"astigmatism": probe_prms.stig,
-                                      "astigmatism_angle": probe_prms.stig_rot,
-                                      "coma": probe_prms.coma,
-                                      "coma_angle": probe_prms.coma_rot,
-                                      "Cs": probe_prms.spherical})
+        probe.ctf.set_parameters({"astigmatism": probe_prms.stig,
+                                  "astigmatism_angle": probe_prms.stig_rot,
+                                  "coma": probe_prms.coma,
+                                  "coma_angle": probe_prms.coma_rot,
+                                  "Cs": probe_prms.spherical})
 
-            fp = FrozenPhonons(model.atoms,
-                               sigmas=potential_prms.fp_sigmas,
-                               num_configs=potential_prms.fp_cfgs,
-                               seed=potential_prms.seed)
+        fp = gen_phonons(model.atoms, potential_prms)
+        potential = gen_potentials(fp, potential_prms)
+        probe.grid.match(potential)
 
-            potential = Potential(fp,
-                                  sampling=potential_prms.sampling,
-                                  device=potential_prms.device,
-                                  projection=potential_prms.projection,
-                                  parametrization=potential_prms.parametrization,
-                                  slice_thickness=potential_prms.slice_thickness)
+        grid = GridScan(start=[0, 0],
+                        end=potential.extent,
+                        sampling=probe.ctf.nyquist_sampling)
 
-            probe.grid.match(potential)
-
-            grid = GridScan(start=[0, 0],
-                            end=potential.extent,
-                            sampling=probe.ctf.nyquist_sampling)
-
+        with dev:
             measurements = probe.scan(grid, detectors, potential, pbar=False)
 
-            results.append(STEMResult(model,
-                                      potential_prms,
-                                      probe_prms,
-                                      grid,
-                                      measurements))
-    # Free the GPU memory for others; if this isn't done, GPU memory is only freed when the Python kernel is reset
-    if potential_prms.device == "gpu" or probe_prms.device == "gpu":
-        # noinspection PyUnboundLocalVariable
-        free_gpu_memory(mempool, pinned_mempool)
+        # Free the GPU memory for others; if this isn't done, GPU memory is only freed when the Python kernel is reset
+        if potential_prms.device == "gpu" or probe_prms.device == "gpu":
+            # noinspection PyUnboundLocalVariable
+            free_gpu_memory(mempool, pinned_mempool)
+
+        results.append(STEMResult(model,
+                                  potential_prms,
+                                  probe_prms,
+                                  grid,
+                                  measurements))
     return results
