@@ -12,7 +12,7 @@ import os
 # import tifffile
 import matplotlib.pyplot as plt
 import numpy as np
-from SingleOrigin.SingleOrigin import utils as so
+from SingleOrigin import utils as so
 from sklearn.neighbors import KernelDensity
 from scipy.spatial import KDTree
 from matplotlib import cm
@@ -80,7 +80,7 @@ def distribution_by_periodic_KDTree(atoms, k, nbins, bwidth):
 
 # %%
 
-fpath = r"C:\Users\charles\Documents\AlScN\raw"
+fpath = r"C:\Users\charles\Documents\AlScN MD models\raw"
 
 fname_0 = "AlN.xyz"
 atoms_0 = read(os.path.join(fpath, fname_0))

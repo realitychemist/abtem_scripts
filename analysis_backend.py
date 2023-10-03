@@ -521,7 +521,7 @@ def get_stats(df: DataFrame,
         on a variety of types depending on what kind of statistics are being used.
     """
     w = make_weights(df, adj_type, a2d)  # May contain islands, so sink them
-    if len(w.islands) != 0:
+    while len(w.islands) != 0:
         w = _sink_islands(df, w)
 
     if len(columns) == 0:
@@ -697,9 +697,8 @@ def _moran_cluster_members(df: DataFrame,
         core_members = {i for i, (p, lab) in enumerate(zip(df["moran_p"], df["moran_quad"]))
                         if (p <= sig) & lab in ([1, 3])}
     members = set(core_members)
-    # for m in core_members:
-    #     members.update(df.iloc[m]["neighborhood"])
-    # TODO: Testing with just core members, not sure if extending to whole neighborhood actually makes sense
+    for m in core_members:
+        members.update(df.iloc[m]["neighborhood"])
     return members
 
 
@@ -761,13 +760,16 @@ def plot_moran_clusters(df: DataFrame,
                         color=mappers[k].to_rgba(df.iloc[r][k]), alpha=0.5)
 
             if r in cluster_members:
-                if df.iloc[r]["moran_quad"] == 1:
+                if df.iloc[r]["moran_quad"] == 1:  # HH cluster core
                     c = "goldenrod"
-                elif df.iloc[r]["moran_quad"] == 3:
+                    a = 0.5
+                elif df.iloc[r]["moran_quad"] == 3:  # LL cluster core
                     c = "maroon"
-                else:
-                    raise ValueError("Logically excluded value present")
-                axs[-1].fill(*zip(*polygon), color=c, alpha=0.5)
+                    a = 0.5
+                else:  # Non-core cluster member
+                    c = "white"
+                    a = 0.0
+                axs[-1].fill(*zip(*polygon), color=c, alpha=a)
 
     for ax, k in zip(axs[:-1], kind):
         match k:
