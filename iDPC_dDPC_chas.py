@@ -18,7 +18,7 @@ import os
 #%% OPEN emd
 
 #file = QFileDialog.getOpenFileName()[0]
-file= fd.askopenfilename()
+file = fd.askopenfilename()
 #myList = os.listdir('<folder location>')
 
 #%% Open file
@@ -247,3 +247,5 @@ else:
 tifffile.imwrite(file.split('.emd')[0]+'_eDPC_dir.tif', efield, metadata=meta[detector.index('A-C')]['BinaryResult']['PixelSize'])
 #efield=Image.merge("HSV",(h,s,v))
 
+
+#%%
